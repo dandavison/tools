@@ -1,0 +1,18 @@
+#!/bin/bash
+
+function hyperlink() {
+    local url="$1"
+    local text="$2"
+    printf '\e]8;;%s\e\\%s\e]8;;\e\\\n' "$url" "$text"
+}
+
+args="$@"
+if [[ "$args" == *"-l"* ]] || [[ "$args" == *"--files-with-matches"* ]]; then
+    rg $args | while read path; do
+        abspath=$(readlink -f $path)
+        url="vscode-insiders://file/$abspath"
+        hyperlink "$url" "$path"
+    done
+else
+    rg --json $args | delta --hunk-header-decoration-style=none --hunk-header-style='file syntax' --hunk-header-file-style=magenta
+fi
