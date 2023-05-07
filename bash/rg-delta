@@ -17,5 +17,5 @@ else
     if [[ -z "$RG_DELTA_NO_HYPERLINK_KEYS" ]]; then
         osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
     fi
-    rg --json $args | delta --hunk-header-decoration-style=none --hunk-header-style='file syntax' --hunk-header-file-style=magenta
+    command rg --json $args | delta --hunk-header-decoration-style=none --hunk-header-style='file syntax' --hunk-header-file-style=magenta
 fi
