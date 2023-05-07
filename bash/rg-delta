@@ -14,7 +14,7 @@ if [[ "$args" == *"-l"* ]] || [[ "$args" == *"--files-with-matches"* ]]; then
         hyperlink "$url" "$path"
     done
 else
-    if [[ -z "$RG_DELTA_NO_HYPERLINK_KEYS" ]]; then
+    if [[ -n "$RG_DELTA_HYPERLINK_KEYS" ]]; then
         osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
     fi
     command rg --json $args | delta --hunk-header-decoration-style=none --hunk-header-style='file syntax' --hunk-header-file-style=magenta
