@@ -10,7 +10,9 @@ args="$@"
 if [[ "$args" == *"-l"* ]] || [[ "$args" == *"--files-with-matches"* ]]; then
     rg $args | while read path; do
         abspath=$(readlink -f $path)
-        url="vscode-insiders://file/$abspath"
+        # url="vscode://file/$abspath"
+        # url="vscode-insiders://file/$abspath"
+        url="pycharm://open?file=$abspath"
         hyperlink "$url" "$path"
     done
 else
