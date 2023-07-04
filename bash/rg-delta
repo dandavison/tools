@@ -9,9 +9,7 @@ function hyperlink() {
 if [[ "$@" == *"-l"* ]] || [[ "$@" == *"--files-with-matches"* ]]; then
     rg "$@" | while read path; do
         abspath=$(readlink -f $path)
-        # url="vscode://file/$abspath"
-        # url="vscode-insiders://file/$abspath"
-        url="pycharm://open?file=$abspath"
+        url="vscode-insiders://file/$abspath"
         hyperlink "$url" "$path"
     done
 else
