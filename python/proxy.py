@@ -19,7 +19,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 REPO_PATHS = {
-    "sdk-core": "/Users/dan/src/temporalio/sdk-python/temporalio/bridge/sdk-core"
+    "sdk-core": "/Users/dan/src/temporalio/sdk-python/temporalio/bridge/sdk-core",
+    "tonic": "/Users/dan/tmp/3p/tonic",
 }
 
 
