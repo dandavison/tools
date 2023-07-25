@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import re
-import ssl
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -36,15 +35,6 @@ def run():
     host, port = addr.split(":")
     port = int(port)
     httpd = HTTPServer((host, port), RequestHandler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(
-        "/Users/dan/.ssh/cert.pem",
-        "/Users/dan/.ssh/key.pem",
-    )
-    httpd.socket = context.wrap_socket(
-        httpd.socket,
-        server_side=True,
-    )
     print(f"Running server on http://{host}:{port}")
     httpd.serve_forever()
 
