@@ -30,13 +30,37 @@ def github_to_vscode_link(url: str) -> Optional[str]:
     if match := re.match(regex, url):
         user, repo, _commit, path, line = match.groups()
         print(path, line)
-        repo_path = REPO_PATHS.get(repo, f"/Users/dan/src/{user}/{repo}")
+        focus_vscode_workspace(repo)
+        repo_path = REPO_PATHS.get(repo, f"/Users/dan/tmp/3p/{repo}")
         url = f"vscode-insiders://file{repo_path}/{path}"
         if line:
             url += f":{line}"
         return url
     else:
         print(f"No match:\n{regex}\n{url}")
+
+
+def focus_vscode_workspace(workspace: str):
+    # GPT
+    lua_code = f"""
+    print('Searching for window matching "{workspace}"')
+    local function is_vscode_with_workspace(window)
+        if string.find(window:application():title(), 'Code', 1, true) then
+            print(window:title())
+            return string.find(window:title(), '{workspace}', 1, true)
+        end
+    end
+
+    for _, window in pairs(hs.window.allWindows()) do
+        if is_vscode_with_workspace(window) then
+            print('Found matching window: ' .. window:title())
+            window:focus()
+            break
+        end
+    end
+    """
+    result = subprocess.run(["hs", "-c", lua_code], stdout=subprocess.PIPE)
+    print(f"{result.stdout.decode('utf-8')}", file=sys.stderr)
 
 
 def run():
