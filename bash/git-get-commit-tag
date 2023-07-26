@@ -1,0 +1,12 @@
+#!/bin/bash
+COMMIT=$1
+PREVTAG=""
+
+for TAG in $(git tag --sort=creatordate); do
+    if git merge-base --is-ancestor $COMMIT $TAG; then
+        if [[ -z "$PREVTAG" ]] || ! git merge-base --is-ancestor $COMMIT $PREVTAG; then
+            echo $TAG
+        fi
+    fi
+    PREVTAG=$TAG
+done
