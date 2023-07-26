@@ -35,9 +35,10 @@ REPO_PATHS = {
 
 def file_to_vscode_link(path: str) -> Optional[str]:
     if path.startswith("/file/"):
-        if repo := get_repo(path.removeprefix("/file/")):
+        path = path.removeprefix("/file/")
+        if repo := get_repo(path):
             focus_vscode_workspace(repo)
-        return f"vscode-insiders://{path}"
+        return f"vscode-insiders://file/{path}"
 
 
 def get_repo(path: str) -> Optional[str]:
