@@ -9,23 +9,44 @@ from typing import Optional
 class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.path == "/favicon.ico":
-            if uri := github_to_vscode_link(self.path):
+            print(self.path)
+            if uri := file_to_vscode_link(self.path):
+                subprocess.run(["open", uri])
+            elif uri := github_to_vscode_link(self.path):
                 subprocess.run(["open", uri])
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(bytes("Redirected to VSCode", "utf8"))
+        self.wfile.write(
+            bytes(
+                "Handled by proxy. This tab should have been closed automatically.",
+                "utf8",
+            )
+        )
         return
 
 
 REPO_PATHS = {
+    "proxy": "/Users/dan/src/devenv/tools/python",
     "sdk-core": "/Users/dan/src/temporalio/sdk-python/temporalio/bridge/sdk-core",
     "tonic": "/Users/dan/tmp/3p/tonic",
 }
 
 
+def file_to_vscode_link(path: str) -> Optional[str]:
+    if path.startswith("/file/"):
+        if repo := get_repo(path.removeprefix("/file/")):
+            focus_vscode_workspace(repo)
+        return f"vscode-insiders://{path}"
+
+
+def get_repo(path: str) -> Optional[str]:
+    for repo, dir in REPO_PATHS.items():
+        if path.startswith(dir):
+            return repo
+
+
 def github_to_vscode_link(url: str) -> Optional[str]:
-    print(url)
     regex = r"/([^/]+)/([^/]+)/blob/([^/]+)/([^?]*)(?:\?line=(\d+))?"
     if match := re.match(regex, url):
         user, repo, _commit, path, line = match.groups()
