@@ -11,9 +11,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not self.path == "/favicon.ico":
             print(self.path)
             if uri := file_to_vscode_link(self.path):
+                print(f"Opening URI: {uri}")
                 subprocess.run(["open", uri])
             elif uri := github_to_vscode_link(self.path):
+                print(f"Opening URI: {uri}")
                 subprocess.run(["open", uri])
+            else:
+                sys.stderr.write(f"ERROR Failed to handle request: {self.path}")
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
