@@ -1,0 +1,15 @@
+#!/bin/bash
+
+exists-in-git() {
+    git ls-tree -r HEAD -- "$1" | rg . >/dev/null
+}
+
+rg --json "$@" |
+    jq -r 'select(.type == "match") | .data.path.text + ":" + (.data.line_number | tostring)' |
+    while IFS=: read -r file line; do
+        exists-in-git "$file" && git blame -L $line,$line "$file"
+    done |
+    rg -r '$1 $0' '.+(20[12][0-9]-[01][0-9]-[123][0-9]).+' |
+    sort -k 1 |
+    cut -d ' ' -f 2- |
+    delta
