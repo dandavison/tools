@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+cat <<EOF
+<table>
+  <tr>
+    <td>
+    </td>
+  </tr
+</table>
+EOF
