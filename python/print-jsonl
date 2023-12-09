@@ -1,0 +1,50 @@
+#!/usr/bin/env python
+import codecs
+import json
+import sys
+
+from rich import print as rprint
+from rich.console import Console
+from rich.syntax import Syntax
+
+console = Console()
+
+
+def main():
+    for line in sys.stdin:
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError
+            console.print(format_record(transform(record)))
+        except Exception:
+            rprint(line)
+
+
+def transform(record: dict) -> dict:
+    for k in ["stacktrace"]:
+        try:
+            v = record[k]
+            if isinstance(v, str):
+                v = format_string(v)
+            if isinstance(v, list):
+                v = list(map(format_string, v))
+            record[k] = v
+        except:
+            pass
+    return record
+
+
+def format_string(s: str) -> str:
+    try:
+        return codecs.decode(s, "unicode_escape")
+    except:
+        return s
+
+
+def format_record(record: dict) -> Syntax:
+    # default, sas, manni
+    return Syntax(json.dumps(record, indent=2), "json", theme="sas", word_wrap=True)
+
+
+main()
