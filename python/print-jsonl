@@ -16,7 +16,7 @@ def main():
             record = json.loads(line)
             if not isinstance(record, dict):
                 raise ValueError
-            console.print(format_record(transform(record)))
+            console.print(style_record(transform(record)))
         except Exception:
             rprint(line)
 
@@ -42,10 +42,12 @@ def format_string(s: str) -> str:
         return s
 
 
-def format_record(record: dict) -> Syntax:
+def style_record(record: dict) -> Syntax:
+    is_error = "error" in record or "stacktrace" in record
+    error_theme = "default"  # happens to apply red style to strings
     s = json.dumps(record, indent=2).replace("\\n", "\n").replace("\\t", "\t")
     # default, sas, manni
-    return Syntax(s, "json", theme="sas", word_wrap=True)
+    return Syntax(s, "json", theme=error_theme if is_error else "sas", word_wrap=True)
 
 
 main()
