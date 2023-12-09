@@ -43,8 +43,9 @@ def format_string(s: str) -> str:
 
 
 def format_record(record: dict) -> Syntax:
+    s = json.dumps(record, indent=2).replace("\\n", "\n").replace("\\t", "\t")
     # default, sas, manni
-    return Syntax(json.dumps(record, indent=2), "json", theme="sas", word_wrap=True)
+    return Syntax(s, "json", theme="sas", word_wrap=True)
 
 
 main()
