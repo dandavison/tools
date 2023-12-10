@@ -3,9 +3,13 @@ import codecs
 import json
 import sys
 
-from rich import print as rprint
-from rich.console import Console
-from rich.syntax import Syntax
+try:
+    from rich import print as rprint
+    from rich.console import Console
+    from rich.syntax import Syntax
+except ImportError:
+    sys.stderr.write("Please install rich: `pip install rich`\n")
+    sys.exit(1)
 
 console = Console()
 
