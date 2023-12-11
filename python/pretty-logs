@@ -22,7 +22,7 @@ def main():
                 raise ValueError
             console.print(style_record(transform(record)))
         except Exception:
-            rprint(line)
+            rprint(line, end="")
 
 
 def transform(record: dict) -> dict:
