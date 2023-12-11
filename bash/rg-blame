@@ -4,6 +4,8 @@ exists-in-git() {
     git ls-tree -r HEAD -- "$1" | rg . >/dev/null
 }
 
+# TODO: blame --show-name and add delta handling
+
 rg --json "$@" |
     jq -r 'select(.type == "match") | .data.path.text + ":" + (.data.line_number | tostring)' |
     while IFS=: read -r file line; do
