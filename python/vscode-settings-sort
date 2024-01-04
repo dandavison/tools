@@ -1,0 +1,30 @@
+#!/usr/bin/env python
+
+import json
+import sys
+from collections import OrderedDict
+from typing import Any
+
+
+def sort_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    return OrderedDict(
+        sorted(settings.items(), key=lambda item: item[0].strip("[]").lower())
+    )
+
+
+if __name__ == "__main__":
+    [file] = sys.argv[1:]
+    comments, lines = [], []
+    with open(file) as f:
+        for l in f.readlines():
+            if l.lstrip().startswith("//"):
+                comments.append(l)
+            else:
+                lines.append(l)
+
+    s = json.loads("\n".join(lines))
+    with open(file, "w") as f:
+        json.dump(sort_settings(s), f, indent=2)
+    with open(file, "a") as f:
+        f.write("\n")
+        f.writelines(comments)
