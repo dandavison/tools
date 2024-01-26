@@ -1,0 +1,4 @@
+mkdir -p tls/ca
+mkdir -p tls/leaf
+tcld generate-certificates certificate-authority-certificate --org com.github.dandavison -d 30d --ca-cert tls/ca/cert.pem --ca-key tls/ca/cert.key
+tcld generate-certificates end-entity-certificate --org com.github.dandavison -d 29d --ca-cert tls/ca/cert.pem --ca-key tls/ca/cert.key --cert tls/leaf/cert.pem --key tls/leaf/cert.key

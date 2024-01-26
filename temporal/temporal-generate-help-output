@@ -1,0 +1,17 @@
+#!/bin/bash
+
+T=temporal
+
+list() {
+    local depth=$1
+    shift
+    ((depth += 1))
+    if [ $depth -gt 2 ]; then return; fi
+    local c
+    for c in $("$@" --generate-bash-completion | sed 's%:.*%%' | grep -v '^h$' | grep -v '^help$'); do
+        "$@" "$c" --help
+        list $depth "$@" "$c"
+    done
+}
+
+list 0 "$T"
