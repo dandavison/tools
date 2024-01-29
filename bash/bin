@@ -1,0 +1,7 @@
+#!/bin/bash
+
+rel_path="$1"
+[ -n "$rel_path" ] || {
+    echo "usage: $(basename $0) path"
+}
+ln -s $(readlink -f "$rel_path") ~/bin/$2

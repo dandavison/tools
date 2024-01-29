@@ -6,7 +6,12 @@ import os
 import re
 import sys
 
-[url] = sys.argv[1:]
+try:
+    [verb, url] = sys.argv[1:]
+except ValueError:
+    from pathlib import Path
+
+    print(f"usage {Path(__file__).name} <verb> <url>")
 
 regex = r"^https?://(?P<hostname>[^:]+):(?P<port>\d+)/namespaces/(?P<namespace>[^/]+)/workflows/(?P<workflow_id>[^/]+)/(?P<run_id>[^/]+)"
 m = re.match(regex, url)
@@ -16,7 +21,7 @@ port = {"8080": "7233"}[w["port"]]
 cmd = [
     "temporal",
     "workflow",
-    "describe",
+    verb,
     "--address",
     f"{w['hostname']}:{port}",
     "--namespace",

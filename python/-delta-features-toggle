@@ -3,6 +3,20 @@ import os
 import sys
 from typing import Iterable, TypeVar
 
+
+def print_toggled_features(prefix: str):
+    toggleable = {"line-numbers", "side-by-side"}
+    feature = only(opt for opt in toggleable if opt.startswith(prefix))
+    features = os.getenv("DELTA_FEATURES") or "+"
+    assert features and features.startswith("+")
+    features = set(filter(bool, features[1:].split(",")))
+    if feature in features:
+        features.remove(feature)
+    else:
+        features.add(feature)
+    print("+" + ",".join(sorted(features)))
+
+
 T = TypeVar("T")
 
 
@@ -19,19 +33,11 @@ def only(it: Iterable[T]) -> T:
         return t
 
 
-toggleable = {"line-numbers", "side-by-side"}
-
-try:
-    [prefix] = sys.argv[1:]
-except ValueError:
-    print(os.getenv("DELTA_FEATURES"))
-    exit(0)
-feature = only(opt for opt in toggleable if opt.startswith(prefix))
-features = os.getenv("DELTA_FEATURES") or "+"
-assert features and features.startswith("+")
-features = set(filter(bool, features[1:].split(",")))
-if feature in features:
-    features.remove(feature)
-else:
-    features.add(feature)
-print("+" + ",".join(sorted(features)))
+if __name__ == "__main__":
+    try:
+        [prefix] = sys.argv[1:]
+    except ValueError:
+        print(os.getenv("DELTA_FEATURES"))
+        exit(0)
+    else:
+        print_toggled_features(prefix)

@@ -1,0 +1,23 @@
+#!/usr/bin/python3
+import asyncio
+import socket
+import sys
+
+
+async def wait_until_listening(host: str, port: int):
+    while True:
+        try:
+            await asyncio.open_connection(h, int(p))
+        except socket.error:
+            await asyncio.sleep(0.5)
+        else:
+            break
+
+
+[arg] = sys.argv[1:]
+if ":" in arg:
+    h, p = arg.split(":")
+else:
+    h, p = "localhost", arg
+
+asyncio.run(wait_until_listening(h, int(p)))

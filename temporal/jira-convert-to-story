@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -u
+
+issue="$1"
+
+curl --request PUT \
+   --url "https://temporalio.atlassian.net/rest/api/3/issue/$issue" \
+   --user "dan.davison@temporal.io:$JIRA_TOKEN" \
+   --header 'Accept: application/json' \
+   --header 'Content-Type: application/json' \
+   --data '{
+    "fields": {
+       "issuetype": {
+          "id": "10001"
+       }
+    }
+  }'
