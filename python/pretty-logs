@@ -17,12 +17,19 @@ console = Console()
 def main():
     for line in sys.stdin:
         try:
-            record = json.loads(line)
+            brace = line.index("{")
+            record = json.loads(line[brace:])
             if not isinstance(record, dict):
                 raise ValueError
+            prefix = line[:brace]
+            if prefix:
+                record["_prefix"] = prefix
             console.print(style_record(transform(record)))
-        except Exception:
-            rprint(line, end="")
+        except:
+            try:
+                rprint(line, end="")
+            except:
+                print(line, end="")
 
 
 def transform(record: dict) -> dict:
