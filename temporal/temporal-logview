@@ -1,1 +1,0 @@
-(cd ~/src/temporalio/logview && go run main.go)
