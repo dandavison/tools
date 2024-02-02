@@ -1,0 +1,19 @@
+#!/bin/bash
+
+fzf() {
+    command fzf --info hidden --prompt ' ' --border rounded --color light "$@"
+}
+
+# 1. Search for text in files using Ripgrep
+# 2. Interactively restart Ripgrep with reload action
+# 3. Open the file in VSCode
+RG_PREFIX="rg --column --line-number --no-heading --color=always --smart-case "
+INITIAL_QUERY="${*:-}"
+: | fzf --ansi --disabled --query "$INITIAL_QUERY" \
+    --bind "start:reload:$RG_PREFIX {q} | delta" \
+    --bind "change:reload:sleep 0.1; $RG_PREFIX {q} | delta || true" \
+    --delimiter : \
+    --preview 'bat --style header,grid --color=always {1} --highlight-line {2}' \
+    --preview-window 'up,50%,border-bottom,+{2}+3/3,~3' \
+    --bind 'ctrl-k:kill-line' \
+    --bind 'enter:execute-silent(code -g {1}:{2})'
