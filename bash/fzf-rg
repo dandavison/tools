@@ -1,12 +1,12 @@
 #!/bin/bash
 
-declare preview='bat --color=always --style=header,numbers -H {2} {1} | grep -C3 {q}'
+declare preview='echo; bat --color=always --style=header -H {2} {1} | rg -C3 {q}'
 
 while getopts ':l' x; do
     case "$x" in
     l)
         list_files=1
-        preview='bat --color=always --style=header,numbers {1} | grep -C3 {q}'
+        preview='echo; bat --color=always --style=header {1} | rg -C3 {q}'
         ;;
     esac
 done
@@ -14,14 +14,20 @@ shift $((OPTIND - 1))
 unset x OPTARG OPTIND
 
 fzf() {
-    # --border rounded
-    command fzf --layout reverse --info hidden --prompt ' ' --color light --ansi "$@"
+    command fzf \
+        --layout reverse \
+        --info hidden \
+        --preview-window='~1' \
+        --prompt ' ' \
+        --color light \
+        --ansi \
+        "$@"
 }
 
-rg --color=always -n ${list_files:+-l} "$1" 2>/dev/null |
+rg --color=always -n ${list_files:+-l} --json "$1" 2>/dev/null | delta --grep-output-type classic |
     fzf -d: \
         --query="$1" \
         --phony \
-        --bind="change:reload:rg -n ${list_files:+-l} --color=always {q}" \
+        --bind="change:reload:rg -n ${list_files:+-l} --color=always --json {q} | delta --grep-output-type classic" \
         --bind='enter:execute:code -g {1}:{2}' \
         --preview="[[ -n {1} ]] && $preview"
