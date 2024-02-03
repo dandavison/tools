@@ -1,17 +1,8 @@
 #!/bin/bash
 
-declare preview='echo; bat --color=always --style=header -H {2} {1} | rg -C3 {q}'
-
-while getopts ':l' x; do
-    case "$x" in
-    l)
-        list_files=1
-        preview='echo; bat --color=always --style=header {1} | rg -C3 {q}'
-        ;;
-    esac
-done
-shift $((OPTIND - 1))
-unset x OPTARG OPTIND
+RG="rg $@ --color=always"
+BAT="bat --color=always --style=header"
+DELTA="delta --grep-output-type classic"
 
 fzf() {
     command fzf \
@@ -21,13 +12,17 @@ fzf() {
         --prompt ' ' \
         --color light \
         --ansi \
+        --bind 'ctrl-k:kill-line' \
         "$@"
 }
 
-rg --color=always -n ${list_files:+-l} --json "$1" 2>/dev/null | delta --grep-output-type classic |
+declare preview="echo; $BAT -H {2} {1} | $RG -C10 {q}"
+
+$RG --json . 2>/dev/null |
+    $DELTA |
     fzf -d: \
-        --query="$1" \
+        --query="${*}" \
         --phony \
-        --bind="change:reload:rg -n ${list_files:+-l} --color=always --json {q} | delta --grep-output-type classic" \
+        --bind="change:reload:$RG --json {q} | $DELTA" \
         --bind='enter:execute:code -g {1}:{2}' \
         --preview="[[ -n {1} ]] && $preview"
