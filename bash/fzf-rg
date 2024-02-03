@@ -1,14 +1,13 @@
 #!/bin/bash
 
 RG="rg $@ --color=always"
-BAT="bat --color=always --style=header"
+BAT="bat --color=always --style=header,grid"
 DELTA="delta --grep-output-type classic"
 
 fzf() {
     command fzf \
         --layout reverse \
         --info hidden \
-        --preview-window='~1' \
         --prompt ' ' \
         --color light \
         --ansi \
@@ -16,7 +15,7 @@ fzf() {
         "$@"
 }
 
-declare preview="echo; $BAT -H {2} {1} | $RG -C10 {q}"
+declare preview="$BAT -H {2} -r {2}:+80 {1}"
 
 $RG --json . 2>/dev/null |
     $DELTA |
