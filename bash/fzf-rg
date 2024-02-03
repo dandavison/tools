@@ -13,9 +13,13 @@ done
 shift $((OPTIND - 1))
 unset x OPTARG OPTIND
 
+fzf() {
+    # --border rounded
+    command fzf --layout reverse --info hidden --prompt ' ' --color light --ansi "$@"
+}
+
 rg --color=always -n ${list_files:+-l} "$1" 2>/dev/null |
     fzf -d: \
-        --ansi \
         --query="$1" \
         --phony \
         --bind="change:reload:rg -n ${list_files:+-l} --color=always {q}" \
