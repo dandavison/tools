@@ -1,7 +1,12 @@
 #!/bin/bash
 
-RG="rg $@ --color=always"
-BAT="bat --color=always --style=header,grid"
+rg_args=
+if [ "$1" = "--exclude-tests" ]; then
+    rg_args+='-i -g "!*test*" -g "!*mock*"'
+    shift
+fi
+
+RG="rg $rg_args --color=always"
 DELTA="delta --grep-output-type classic"
 
 fzf() {
@@ -12,10 +17,11 @@ fzf() {
         --color light \
         --ansi \
         --bind 'ctrl-k:kill-line' \
+        --bind 'alt-right:forward-word' \
+        --bind 'alt-left:backward-word' \
+        --preview-window 'up,70%' \
         "$@"
 }
-
-declare preview="$BAT -H {2} -r {2}:+80 {1}"
 
 $RG --json . 2>/dev/null |
     $DELTA |
@@ -24,4 +30,4 @@ $RG --json . 2>/dev/null |
         --phony \
         --bind="change:reload:$RG --json {q} | $DELTA" \
         --bind='enter:execute:code -g {1}:{2}' \
-        --preview="[[ -n {1} ]] && $preview"
+        --preview="[[ -n {1} ]] && fzf-rg-preview {1} {2}"

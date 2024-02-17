@@ -1,0 +1,14 @@
+#!/bin/bash
+
+file="$1"
+line="$2"
+
+start_line=$((line - 10))
+start_line=$((start_line < 1 ? 1 : start_line))
+
+bat --color=always \
+    --style=header,grid \
+    -H $line \
+    -r $start_line:+70 \
+    "$file" \
+    "$@"
