@@ -9,12 +9,12 @@ function hyperlink() {
 if [[ "$@" == *"-l"* ]] || [[ "$@" == *"--files-with-matches"* ]]; then
     rg "$@" | while read path; do
         abspath=$(readlink -f $path)
-        url="vscode-insiders://file/$abspath"
+        url="vscode://file/$abspath"
         hyperlink "$url" "$path"
     done
 else
     if [[ -n "$RG_DELTA_HYPERLINK_KEYS" ]]; then
         osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
     fi
-    command rg --json "$@" | delta
+    command rg --json -C 10 "$@" | delta
 fi

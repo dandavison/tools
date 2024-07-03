@@ -1,7 +1,10 @@
 #!/bin/bash
+set -e
 
-rel_path="$1"
-[ -n "$rel_path" ] || {
-    echo "usage: $(basename $0) path"
+die() {
+    echo "$1" 1>&2
+    exit 1
 }
+rel_path="$1"
+[ -f "$rel_path" ] && [ -x "$rel_path" ] || die "error: $rel_path is not an executable"
 ln -s $(readlink -f "$rel_path") ~/bin/$2

@@ -1,13 +1,13 @@
 #!/bin/bash
 
-rg_args=
+rg_args='-i'
 if [ "$1" = "--exclude-tests" ]; then
-    rg_args+='-i -g "!*test*" -g "!*mock*"'
+    rg_args+=' -g "!*test*" -g "!*mock*" -g "!openapiv*"'
     shift
 fi
 
 RG="rg $rg_args --color=always"
-DELTA="delta --grep-output-type classic"
+DELTA="delta --light --grep-output-type classic"
 
 fzf() {
     command fzf \
@@ -20,14 +20,15 @@ fzf() {
         --bind 'alt-right:forward-word' \
         --bind 'alt-left:backward-word' \
         --preview-window 'up,70%' \
+        --history /tmp/fzf-rg.history \
         "$@"
 }
 
-$RG --json . 2>/dev/null |
+$RG --json . $1 2>/dev/null |
     $DELTA |
     fzf -d: \
         --query="${*}" \
         --phony \
-        --bind="change:reload:$RG --json {q} | $DELTA" \
+        --bind="change:reload:$RG --json {q} $1 | $DELTA" \
         --bind='enter:execute:code -g {1}:{2}' \
         --preview="[[ -n {1} ]] && fzf-rg-preview {1} {2}"

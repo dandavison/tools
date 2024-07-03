@@ -4,12 +4,13 @@
 
 while out=$(git stash list "$@" |
             fzf --ansi --no-sort --reverse --print-query --query="$query"      \
+                --color light --info hidden                                    \
                 --expect=ctrl-a,ctrl-b,ctrl-p,del                              \
                 --bind="ctrl-u:preview-page-up"                                \
                 --bind="ctrl-d:preview-page-down"                              \
                 --bind="ctrl-k:preview-up"                                     \
                 --bind="ctrl-j:preview-down"                                   \
-                --preview="echo {} | cut -d':' -f1 | xargs git stash show -p"  \
+                --preview="echo {} | cut -d':' -f1 | xargs git stash show -p | delta"  \
                 --preview-window='down:85%');
 do
     # Tokenize selection by newline

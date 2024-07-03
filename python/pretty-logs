@@ -13,7 +13,7 @@ except ImportError:
 
 console = Console()
 
-global INFO_LOG_FILE
+INFO_LOG_FILE = None
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
             if prefix:
                 record["_prefix"] = prefix
             record = transform(record)
-            if record.get("level", "").lower() == "info":
+            if INFO_LOG_FILE and record.get("level", "").lower() == "info":
                 with open(INFO_LOG_FILE, "a") as f:
                     print(record, file=f)
             else:
@@ -70,8 +70,10 @@ def style_record(record: dict) -> Syntax:
     return Syntax(s, "json", theme=error_theme if is_error else "sas", word_wrap=True)
 
 
-[INFO_LOG_FILE] = sys.argv[1:]
-with open(INFO_LOG_FILE, "w") as f:
-    pass
+if len(sys.argv[1:]):
+    [INFO_LOG_FILE] = sys.argv[1:]
+    with open(INFO_LOG_FILE, "w") as f:
+        pass
+
 
 main()
