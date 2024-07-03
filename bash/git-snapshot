@@ -1,0 +1,35 @@
+#!/bin/bash
+
+git-snapshot() {
+    # ChatGPT4o
+    #   Write a shell script, to be named git-snapshot. It will do the following:
+    # - Take the current branch name.
+    # - Prefix it with "z-"
+    # - Suffix it with "-$n" where n is an integer satisfying the following: it is the smallest
+    #   integer such that no branch with the name exists already.
+    # - Use git branch -c to create a snapshot copy of the current branch, with the name you've
+    #   constructed. Print out the branch name created (or even better, perhaps git branch has a
+    #   "verbose" flag you can use for that purpose.
+
+    # Get the current branch name
+    local current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+    # Prefix and base for the snapshot branch
+    local prefix="z-"
+    local suffix_base="-"
+
+    # Find the smallest integer n for which the branch name doesn't exist
+    local n=1
+    while git show-ref --verify --quiet refs/heads/"$prefix$current_branch$suffix_base$n"; do
+        n=$((n + 1))
+    done
+
+    # Construct the new branch name
+    local new_branch="$prefix$current_branch$suffix_base$n"
+
+    # Create the snapshot branch
+    git branch -c "$current_branch" "$new_branch"
+
+    # Output the name of the created branch
+    echo "Created branch: $new_branch"
+}
