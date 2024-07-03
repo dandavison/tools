@@ -1,7 +1,15 @@
 #!/bin/bash
 
-# Function to compute the next snapshot name for the current branch
-next_snapshot_name() {
+most_recent_snapshot() {
+    local current_branch=$(git rev-parse --abbrev-ref HEAD)
+    local prefix="z-"
+    local suffix_base="-"
+    local latest_snapshot=$(git branch --list "$prefix$current_branch$suffix_base*" | sort -V | tail -n 1)
+
+    echo "$latest_snapshot"
+}
+
+next_snapshot() {
     local current_branch=$(git rev-parse --abbrev-ref HEAD)
     local prefix="z-"
     local suffix_base="-"
@@ -14,22 +22,10 @@ next_snapshot_name() {
     echo "$prefix$current_branch$suffix_base$n"
 }
 
-# Function to compute the most recent snapshot name for the current branch
-most_recent_snapshot_name() {
-    local current_branch=$(git rev-parse --abbrev-ref HEAD)
-    local prefix="z-"
-    local suffix_base="-"
-    local latest_snapshot=$(git branch --list "$prefix$current_branch$suffix_base*" | sort -V | tail -n 1)
-
-    echo "$latest_snapshot"
-}
-
-# Argument parsing
 if [[ "$1" == "--create" || "$1" == "-c" ]]; then
-    new_branch=$(next_snapshot_name)
+    new_branch=$(next_snapshot)
     git branch -c "$(git rev-parse --abbrev-ref HEAD)" "$new_branch"
     echo "Created branch: $new_branch"
 else
-    most_recent_snapshot=$(most_recent_snapshot_name)
-    echo "Most recent snapshot: $most_recent_snapshot"
+    echo $(most_recent_snapshot)
 fi
