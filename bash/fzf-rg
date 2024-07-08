@@ -24,7 +24,7 @@ fzf() {
         "$@"
 }
 
-$RG --json . $1 2>/dev/null |
+$RG --json . "$@" 2>/dev/null |
     $DELTA |
     fzf -d: \
         --query="${*}" \

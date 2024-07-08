@@ -22,10 +22,17 @@ next_snapshot() {
     echo "$prefix$current_branch$suffix_base$n"
 }
 
-if [[ "$1" == "--create" || "$1" == "-c" ]]; then
+die() {
+    echo "git snapshot [create|c]" 1>&2
+    exit 1
+}
+
+if [[ "$1" == "create" || "$1" == "c" ]]; then
     new_branch=$(next_snapshot)
     git branch -c "$(git rev-parse --abbrev-ref HEAD)" "$new_branch"
     echo "Created branch: $new_branch"
+elif [[ -n "$1" ]]; then
+    die
 else
     echo $(most_recent_snapshot)
 fi
