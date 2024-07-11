@@ -7,7 +7,7 @@ function hyperlink() {
 }
 
 if [[ "$@" == *"-l"* ]] || [[ "$@" == *"--files-with-matches"* ]]; then
-    rg "$@" | while read path; do
+    rg --hidden -g '!.git/*' "$@" | while read path; do
         abspath=$(readlink -f $path)
         url="vscode://file/$abspath"
         hyperlink "$url" "$path"
@@ -16,5 +16,5 @@ else
     if [[ -n "$RG_DELTA_HYPERLINK_KEYS" ]]; then
         osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
     fi
-    command rg --json -C 10 "$@" | delta
+    rg --hidden -g '!.git/*' --json -C 10 "$@" | delta
 fi
