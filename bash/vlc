@@ -1,0 +1,4 @@
+#!/bin/bash
+
+command vlc "$@" >/dev/null &
+osascript -e 'delay 0.5' -e 'tell application "VLC" to activate'
