@@ -2,6 +2,9 @@
 import codecs
 import json
 import sys
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Self
 
 try:
     from rich import print
@@ -15,65 +18,127 @@ console = Console()
 
 INFO_LOG_FILE = None
 
+IGNORE_ERRORS = [r'container not found ("admin-tools")']
+
 
 def main():
     for line in sys.stdin:
         try:
-            brace = line.index("{")
-            record = json.loads(line[brace:])
-            if not isinstance(record, dict):
-                raise ValueError
-        except:
-            print(line, end="")
-        else:
-            prefix = line[:brace]
-            if prefix:
-                record["_prefix"] = prefix
-            record = transform(record)
-            if INFO_LOG_FILE and record.get("level", "").lower() == "info":
-                with open(INFO_LOG_FILE, "a") as f:
-                    print(record, file=f)
+            if entry := LogEntry.from_line(line):
+                entry.print()
             else:
-                console.print(style_record(record))
+                print(line, end="")
+        except Exception as err:
+            print(f"{err.__class__.__name__}({err})")
+            print(line, end="")
 
 
-def transform(record: dict) -> dict:
-    for k in ["stacktrace"]:
-        try:
-            v = record[k]
+class Level(Enum):
+    INFO = 1
+    WARN = 2
+    ERROR = 3
+    IGNORED_ERROR = 4
+
+
+class Unparseable(Exception):
+    pass
+
+
+@dataclass
+class LogEntry:
+    record: dict
+
+    @classmethod
+    def from_line(cls, line: str) -> Optional[Self]:
+        if "{" not in line:
+            return None
+        brace = line.index("{")
+        record = json.loads(line[brace:])
+        if not isinstance(record, dict):
+            raise ValueError
+        prefix = line[:brace]
+        if prefix:
+            record["_prefix"] = prefix
+        return cls(record)
+
+    def __post_init__(self) -> None:
+        self.transform()
+
+    def print(self) -> None:
+        match self.level:
+            case Level.INFO | Level.IGNORED_ERROR:
+                if INFO_LOG_FILE:
+                    with open(INFO_LOG_FILE, "a") as f:
+                        print(self.record, file=f)
+                else:
+                    if msg := self.record.get("msg"):
+                        print(f"{self.level.name}: {msg}")
+                    else:
+                        print(self.serialize())
+                    # console.print(style_string(output, self.level))
+            case _:
+                console.print(style_string(self.serialize(), self.level))
+
+    def serialize(self) -> str:
+        return (
+            json.dumps(self.record, indent=2).replace("\\n", "\n").replace("\\t", "\t")
+        )
+
+    def transform(self) -> None:
+        for k in ["stacktrace"]:
+            if k not in self.record:
+                continue
+            v = self.record[k]
             if isinstance(v, str):
                 v = format_string(v)
             if isinstance(v, list):
                 v = list(map(format_string, v))
-            record[k] = v
-        except:
-            pass
-    return record
+            self.record[k] = v
+
+    @property
+    def level(self) -> Optional[Level]:
+        # or "error" in record
+        # or "stacktrace" in record
+        match self.record.get("level", "").lower():
+            case "info":
+                return Level.INFO
+            case "warn":
+                return Level.WARN
+            case "error":
+                if err := self.error:
+                    for s in IGNORE_ERRORS:
+                        if s in err:
+                            return Level.IGNORED_ERROR
+                return Level.ERROR
+            case _:
+                return None
+
+    @property
+    def error(self) -> Optional[str]:
+        for k in ["Error", "error"]:
+            if v := self.record.get(k):
+                return v
+
+
+def style_string(s: str, level: Optional[Level]) -> Syntax:
+    error_theme = "default"  # happens to apply red style to strings
+    # default, sas, manni
+    return Syntax(
+        s, "json", theme=error_theme if level == Level.ERROR else "sas", word_wrap=True
+    )
 
 
 def format_string(s: str) -> str:
     try:
         return codecs.decode(s, "unicode_escape")
-    except:
+    except Exception:
         return s
 
 
-def style_record(record: dict) -> Syntax:
-    is_error = (
-        record.get("level", "").lower() == "error"
-        or "error" in record
-        or "stacktrace" in record
-    )
-    error_theme = "default"  # happens to apply red style to strings
-    s = json.dumps(record, indent=2).replace("\\n", "\n").replace("\\t", "\t")
-    # default, sas, manni
-    return Syntax(s, "json", theme=error_theme if is_error else "sas", word_wrap=True)
+if __name__ == "__main__":
+    if len(sys.argv[1:]):
+        [INFO_LOG_FILE] = sys.argv[1:]
+        with open(INFO_LOG_FILE, "w") as f:
+            pass
 
-
-if len(sys.argv[1:]):
-    [INFO_LOG_FILE] = sys.argv[1:]
-    with open(INFO_LOG_FILE, "w") as f:
-        pass
-
-
-main()
+    main()
