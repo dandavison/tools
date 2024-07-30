@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import sys
+from enum import Enum
+from pathlib import Path
+
+
+class Language(Enum):
+    Dotnet = 1
+    Go = 2
+    Java = 3
+    Node = 4
+    Python = 5
+    Ruby = 6
+    Rust = 7
+
+
+def transform_command(
+    cmd: list[str],
+    lang: Language,
+) -> list[str]:
+    match lang:
+        case Language.Dotnet:
+            return debug_dotnet(cmd)
+        case Language.Go:
+            return debug_go(cmd)
+        case Language.Java:
+            return debug_java(cmd)
+        case Language.Node:
+            return debug_node(cmd)
+        case Language.Python:
+            return debug_python(cmd)
+        case Language.Ruby:
+            return debug_ruby(cmd)
+        case Language.Rust:
+            return debug_rust(cmd)
+
+
+def debug_dotnet(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging dotnet has not been tested", file=sys.stderr)
+    return ["dotnet", "exec", "--inspect", "--inspect-brk"]
+
+
+def debug_go(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging go has not been tested", file=sys.stderr)
+    return [
+        "dlv",
+        "--listen=:2345",
+        "--headless=true",
+        "--api-version=2",
+        "exec",
+    ] + cmd
+
+
+def debug_java(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging java has not been tested", file=sys.stderr)
+    return [
+        "java",
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005",
+    ] + cmd
+
+
+def debug_node(cmd: list[str]) -> list[str]:
+    env_file = "/tmp/vscode-node-debug.env"
+    if not Path(env_file).exists():
+        print(f"Run `env > {env_file}` in the VSCode JavaScript Debug Terminal")
+        exit(1)
+    with open(env_file) as f:
+        for line in f:
+            for k in ["NODE_OPTIONS", "VSCODE_INSPECTOR_OPTIONS"]:
+                if v := line.rstrip().partition(f"{k}=")[2]:
+                    print(f"setting env var: {k} = {v}")
+                    os.environ[k] = v
+    return cmd
+
+
+def debug_python(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging python has not been tested", file=sys.stderr)
+    return [
+        "python",
+        "-m",
+        "debugpy",
+        "--wait-for-client",
+        "--listen",
+        "5678",
+    ] + cmd
+
+
+def debug_ruby(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging ruby has not been tested", file=sys.stderr)
+    return [
+        "rdebug-ide",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "1234",
+        "--",
+    ] + cmd
+
+
+def debug_rust(cmd: list[str]) -> list[str]:
+    print("WARNING: debugging rust has not been tested", file=sys.stderr)
+    return ["rust-gdb", "--args"] + cmd
+
+
+def guess_language(cmd: list[str]):
+    for word in cmd:
+        if word in {"node", "ts-node", "npm"}:
+            return Language.Node
+        elif word in {"python", "pytest", "poe"}:
+            return Language.Python
+    raise ValueError(f"Failed to guess language from command: {' '.join(cmd)}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run a command under the VSCode debugger"
+    )
+    parser.add_argument(
+        "-l",
+        "--language",
+        type=str,
+        choices=[lang.name.lower() for lang in Language],
+        help="Language to debug",
+    )
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="The command to run")
+    args = parser.parse_args()
+
+    cmd: list[str] = args.command
+    lang: Language = (
+        Language[args.language.capitalize()] if args.language else guess_language(cmd)
+    )
+
+    assert args.command, "You didn't supply a command."
+    cmd = transform_command(cmd, lang)
+    os.execvp(cmd[0], cmd)
