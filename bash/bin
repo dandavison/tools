@@ -6,5 +6,6 @@ die() {
     exit 1
 }
 rel_path="$1"
-[ -f "$rel_path" ] && [ -x "$rel_path" ] || die "error: $rel_path is not an executable"
+[ -f "$rel_path" ] || die "error: $rel_path is not a file"
+chmod +x "$rel_path"
 ln -s $(readlink -f "$rel_path") ~/bin/$2
