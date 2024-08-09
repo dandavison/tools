@@ -1,0 +1,19 @@
+#!/usr/bin/env python
+import re
+import sys
+
+
+def main(f):
+    for line in f:
+        # split the line into the #* prefix and the rest
+        _, section_prefix, line = re.split("^(#*)", line, maxsplit=1)
+        if not section_prefix:
+            continue
+        n = len(section_prefix) - 1
+        if not n:
+            print()
+        print("  " * n, section_prefix, line, sep="", end="")
+
+
+if __name__ == "__main__":
+    main(sys.stdin)
