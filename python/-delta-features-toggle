@@ -22,12 +22,12 @@ def print_toggled_features(prefix: str):
     [feature] = features
     features = os.getenv("DELTA_FEATURES") or "+"
     assert features and features.startswith("+")
-    features = set(filter(bool, features[1:].split(",")))
+    features = set(filter(bool, features[1:].split(" ")))
     if feature in features:
         features.remove(feature)
     else:
         features.add(feature)
-    print("+" + ",".join(sorted(features)))
+    print("+" + " ".join(sorted(features)))
 
 
 if __name__ == "__main__":
