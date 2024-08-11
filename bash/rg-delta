@@ -6,9 +6,10 @@ function hyperlink() {
     printf '\e]8;;%s\e\\%s\e]8;;\e\\\n' "$url" "$text"
 }
 
-if [[ "$@" == *" -l "* ]] || [[ "$@" == *" --files-with-matches "* ]]; then
+
+if echo "$@" | rg -q '(^| )\-[^- ]*l[^-]+' || [[ "$*" == *" --files-with-matches "* ]]; then
     rg --hidden -g '!.git/*' "$@" | while read path; do
-        abspath=$(readlink -f -- $path)
+        abspath=$(readlink -f -- "$path")
         url="vscode://file/$abspath"
         hyperlink "$url" "$path"
     done
