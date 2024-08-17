@@ -17,5 +17,5 @@ else
     if [[ -n "$RG_DELTA_HYPERLINK_KEYS" ]]; then
         osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
     fi
-    rg --hidden -g '!.git/*' --json -C 10 "$@" | delta
+    rg --hidden -g '!.git/*' --json "$@" | delta
 fi
