@@ -7,5 +7,7 @@ die() {
 }
 rel_path="$1"
 [ -f "$rel_path" ] || die "error: $rel_path is not a file"
-chmod +x "$rel_path"
-ln -s $(readlink -f "$rel_path") ~/bin/$2
+if [ ! -x "$rel_path" ]; then
+    chmod +x "$rel_path"
+fi
+ln -fs $(readlink -f "$rel_path") ~/bin/"$2"
