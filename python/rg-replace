@@ -1,0 +1,49 @@
+#!/usr/bin/env uv run python
+
+import json
+import os
+import sys
+
+
+def replace(replacement: str) -> None:
+    """
+    For each search hit in the rg json output, modify the file such that the
+    matching text is replaced with `replacement`
+    """
+    rg_data = [
+        json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()
+    ]
+
+    file_modifications = {}
+
+    for entry in rg_data:
+        if entry["type"] == "match":
+            file_path = entry["data"]["path"]["text"]
+            line_number = entry["data"]["line_number"]
+            submatches = entry["data"]["submatches"]
+
+            if file_path not in file_modifications:
+                with open(file_path, "r") as file:
+                    file_modifications[file_path] = file.readlines()
+
+            for submatch in submatches:
+                start = submatch["start"]
+                end = submatch["end"]
+                line = file_modifications[file_path][line_number - 1]
+                file_modifications[file_path][line_number - 1] = (
+                    line[:start] + replacement + line[end:]
+                )
+
+    for file_path, lines in file_modifications.items():
+        with open(file_path, "w") as file:
+            file.writelines(lines)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        executable = os.path.basename(sys.argv[0])
+        print(f"Usage: rg --json ... | {executable} <replacement>")
+        sys.exit(1)
+
+    replacement = sys.argv[1]
+    replace(replacement)
