@@ -1,0 +1,53 @@
+#!/bin/bash
+
+processes() {
+    (osqueryi --list --separator ',') <<EOF
+SELECT p.pid, p.name, p.cwd
+FROM processes AS p
+WHERE name like '%cursor%'
+AND cwd like '/Users/dan/src/%'
+ORDER BY cwd;
+EOF
+}
+
+processes-display() {
+    processes | column -t -s ','
+}
+
+pids() {
+    (osqueryi --list --separator ',') <<EOF
+SELECT p.pid
+FROM processes AS p
+WHERE name like '%cursor%'
+ORDER BY p.cmdline;
+EOF
+}
+
+current-app() {
+    hs <<EOF
+    local app = hs.application.frontmostApplication()
+    print(app:name())
+EOF
+}
+
+windows() {
+    hs <<EOF
+    for _, win in ipairs(hs.window.allWindows()) do
+        local app = win:application()
+        if app:name() == "Cursor" then
+            print(app:name() .. "," .. win:pid() .. "," .. win:title())
+        end
+    end
+EOF
+}
+
+vscode-summary() {
+    (processes | sed 1d | rg -r '' '(temporalio/)?' | tee /dev/stderr | wc -l) 2>&1 |
+        column -t -s ','
+    printf "\n"
+    (windows | tee /dev/stderr | wc -l) 2>&1 |
+        column -t -s ',' |
+        python -c 'import sys; lines = list(sys.stdin.readlines()); print("".join(sorted(lines, key=lambda line: line.split()[-1])))'
+}
+
+vscode-summary
