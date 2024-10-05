@@ -10,7 +10,7 @@ function hyperlink() {
 if echo "$@" | rg -q '(^| )\-[^- ]*l[^-]+' || [[ "$*" == *" --files-with-matches "* ]]; then
     rg --hidden -g '!.git/*' "$@" | while read path; do
         abspath=$(readlink -f -- "$path")
-        url="vscode://file/$abspath"
+        url="cursor://file/$abspath"
         hyperlink "$url" "$path"
     done
 else

@@ -22,7 +22,13 @@ if __name__ == "__main__":
             else:
                 lines.append(l)
 
-    s = json.loads("\n".join(lines))
+    t = "".join(lines)
+    try:
+        s = json.loads(t)
+    except json.JSONDecodeError as err:
+        print(f"Failed to decode JSON: {err}")
+        print(t, file=open("/tmp/vscode-settings-sort.json", "w"))
+        sys.exit(1)
     with open(file, "w") as f:
         json.dump(sort_settings(s), f, indent=2)
     with open(file, "a") as f:
