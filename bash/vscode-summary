@@ -10,26 +10,6 @@ ORDER BY cwd;
 EOF
 }
 
-processes-display() {
-    processes | column -t -s ','
-}
-
-pids() {
-    (osqueryi --list --separator ',') <<EOF
-SELECT p.pid
-FROM processes AS p
-WHERE name like '%cursor%'
-ORDER BY p.cmdline;
-EOF
-}
-
-current-app() {
-    hs <<EOF
-    local app = hs.application.frontmostApplication()
-    print(app:name())
-EOF
-}
-
 windows() {
     hs <<EOF
     for _, win in ipairs(hs.window.allWindows()) do
@@ -47,7 +27,7 @@ vscode-summary() {
     printf "\n"
     (windows | tee /dev/stderr | wc -l) 2>&1 |
         column -t -s ',' |
-        python -c 'import sys; lines = list(sys.stdin.readlines()); print("".join(sorted(lines, key=lambda line: line.split()[-1])))'
+        /usr/bin/python3 -c 'import sys; lines = list(sys.stdin.readlines()); print("".join(sorted(lines, key=lambda line: line.split()[-1])))'
 }
 
 vscode-summary
