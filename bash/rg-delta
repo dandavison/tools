@@ -14,8 +14,5 @@ if echo "$@" | rg -q '(^| )\-[^- ]*l[^-]+' || [[ "$*" == *" --files-with-matches
         hyperlink "$url" "$path"
     done
 else
-    if [[ -n "$RG_DELTA_HYPERLINK_KEYS" ]]; then
-        osascript -e 'tell application "System Events" to tell process "Alacritty" to keystroke "." using command down'
-    fi
     rg --hidden -g '!.git/*' --json "$@" | delta
 fi
