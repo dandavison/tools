@@ -1,0 +1,18 @@
+#!/bin/bash
+
+close-project() {
+    local project="$1"
+    hs <<EOF
+    for _, win in ipairs(hs.window.allWindows()) do
+        local app = win:application()
+        if app:name() == "Cursor" then
+            local title = win:title()
+            if title:sub(-#"$project") == "$project" then
+                win:close()
+            end
+        end
+    end
+EOF
+}
+
+close-project "$1"
