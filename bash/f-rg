@@ -7,6 +7,10 @@ if [ "$1" = "--exclude-tests" ]; then
 fi
 
 RG="rg $rg_args --color=always"
+if [ -f .rg-config ]; then
+    RG="RIPGREP_CONFIG_PATH=.rg-config $RG"
+fi
+
 DELTA="delta --light --grep-output-type classic"
 
 fzf() {
