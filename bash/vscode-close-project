@@ -2,23 +2,16 @@
 
 close-project() {
     local project="$1"
-    hs <<EOF
-    for _, win in ipairs(hs.window.allWindows()) do
-        local app = win:application()
-        if app:name() == "Cursor" then
-            local title = win:title()
-            if title:match(" — $project\$") then
-                print("Closing " .. title .. " isFullScreen: " .. tostring(win:isFullScreen()) .. " isMinimized: " .. tostring(win:isMinimized()))
-                win:toggleFullScreen()
-                win:toggleZoom()
-                hs.timer.usleep(500000)
-                print("Closing " .. title .. " isFullScreen: " .. tostring(win:isFullScreen()) .. " isMinimized: " .. tostring(win:isMinimized()))
-                win:setFullScreen(false)  -- unmaximize first
-                win:minimize()
-                win:close()
-            end
-        end
-    end
+    osascript <<EOF
+tell application "Cursor"
+    repeat with w in windows
+        if w's name ends with " — $project" then
+            set miniaturized of w to true
+            delay 0.1
+            close w
+        end if
+    end repeat
+end tell
 EOF
 }
 
