@@ -3,14 +3,18 @@
 close-project() {
     local project="$1"
     osascript <<EOF
-tell application "Cursor"
-    repeat with w in windows
-        if w's name ends with " — $project" then
-            set miniaturized of w to true
-            delay 0.1
-            close w
-        end if
-    end repeat
+tell application "System Events"
+    tell process "Cursor"
+        repeat with w in windows
+            log "Checking window: " & w's title
+            if w's title ends with " — $project" then
+                log "Found matching window: " & w's title
+                set value of attribute "AXMinimized" of w to true
+                delay 0.1
+                click button 1 of w
+            end if
+        end repeat
+    end tell
 end tell
 EOF
 }
