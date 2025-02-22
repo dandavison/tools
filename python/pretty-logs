@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env uv run --script
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -12,13 +12,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Self
 
-try:
-    from rich import print
-    from rich.console import Console
-    from rich.syntax import Syntax
-except ImportError:
-    sys.stderr.write("Please install rich: `pip install rich`\n")
-    sys.exit(1)
+from rich import print
+from rich.console import Console
+from rich.syntax import Syntax
 
 console = Console()
 
