@@ -7,7 +7,14 @@ close-project() {
         local app = win:application()
         if app:name() == "Cursor" then
             local title = win:title()
-            if title:sub(-#"$project") == "$project" then
+            if title:match(" — $project\$") then
+                print("Closing " .. title .. " isFullScreen: " .. tostring(win:isFullScreen()) .. " isMinimized: " .. tostring(win:isMinimized()))
+                win:toggleFullScreen()
+                win:toggleZoom()
+                hs.timer.usleep(500000)
+                print("Closing " .. title .. " isFullScreen: " .. tostring(win:isFullScreen()) .. " isMinimized: " .. tostring(win:isMinimized()))
+                win:setFullScreen(false)  -- unmaximize first
+                win:minimize()
                 win:close()
             end
         end
