@@ -27,11 +27,17 @@ fzf() {
         "$@"
 }
 
-$RG --json . "$@" 2>/dev/null |
+initial_command() {
+    if [[ -n "$1" ]]; then
+        $RG --json "$*" . 2>/dev/null
+    fi
+}
+
+initial_command "$@" |
     $DELTA |
     fzf -d: \
-        --query="${*}" \
+        --query="$*" \
         --phony \
-        --bind="change:reload:$RG --json {q} $1 | $DELTA" \
+        --bind="change:reload:$RG --json {q} . | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
