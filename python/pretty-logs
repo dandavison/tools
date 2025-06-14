@@ -5,6 +5,7 @@
 #     "rich",
 # ]
 # ///
+import builtins
 import codecs
 import json
 import sys
@@ -29,7 +30,7 @@ def main():
             if entry := LogEntry.from_line(line):
                 entry.print()
             else:
-                print(line, end="")
+                builtins.print(line, end="")
         except Exception as err:
             print(f"{err.__class__.__name__}({err})")
             print(line, end="")
@@ -68,7 +69,7 @@ class LogEntry:
 
     def print(self) -> None:
         match self.level:
-            case Level.INFO | Level.IGNORED_ERROR:
+            case Level.IGNORED_ERROR | Level.INFO:
                 if INFO_LOG_FILE:
                     with open(INFO_LOG_FILE, "a") as f:
                         print(self.record, file=f)
@@ -143,4 +144,7 @@ if __name__ == "__main__":
         with open(INFO_LOG_FILE, "w") as f:
             pass
 
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
