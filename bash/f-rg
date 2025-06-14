@@ -39,7 +39,7 @@ initial_command "$@" |
     fzf -d: \
         --query="$* " \
         --phony \
-        --bind='start:execute(sleep 0.05)+backward-delete-char' \
+        --bind='start:backward-delete-char' \
         --bind="change:reload:$RG --json {q} . | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
