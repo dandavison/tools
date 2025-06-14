@@ -27,9 +27,11 @@ fzf() {
         "$@"
 }
 
+RG_PATH="${RG_PATH:-.}"
+
 initial_command() {
     if [[ -n "$1" ]]; then
-        $RG --json "$*" . 2>/dev/null
+        $RG --json "$*" "$RG_PATH" 2>/dev/null
     fi
 }
 
@@ -40,6 +42,6 @@ initial_command "$@" |
         --query="$* " \
         --phony \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:$RG --json {q} . | $DELTA" \
+        --bind="change:reload:$RG --json {q} $RG_PATH | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
