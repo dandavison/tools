@@ -33,11 +33,13 @@ initial_command() {
     fi
 }
 
+# Hack: to trigger display of initial results, we append a space then delete it on start
 initial_command "$@" |
     $DELTA |
     fzf -d: \
-        --query="$*" \
+        --query="$* " \
         --phony \
+        --bind='start:execute(sleep 0.05)+backward-delete-char' \
         --bind="change:reload:$RG --json {q} . | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
