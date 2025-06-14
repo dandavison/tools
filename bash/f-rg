@@ -6,6 +6,13 @@ if [ "$1" = "--exclude-tests" ]; then
     shift
 fi
 
+pattern="$1"
+shift
+paths=("$@")
+if [[ ${#paths[@]} -eq 0 ]]; then
+    paths=(".")
+fi
+
 RG="rg $rg_args --color=always"
 if [ -f .rg-config ]; then
     RG="RIPGREP_CONFIG_PATH=.rg-config $RG"
@@ -27,17 +34,14 @@ fzf() {
         "$@"
 }
 
-initial_command() {
-    if [[ -n "$1" ]]; then
-        $RG --json "$*" . 2>/dev/null
+{
+    if [[ -n "$pattern" ]]; then
+        $RG --json "$pattern" "${paths[@]}" 2>/dev/null
     fi
-}
-
-initial_command "$@" |
+} |
     $DELTA |
     fzf -d: \
-        --query="$*" \
-        --phony \
-        --bind="change:reload:$RG --json {q} . | $DELTA" \
+        --query="$pattern" \
+        --bind="change:reload:$RG --json {q} '${paths[*]}' | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
