@@ -73,10 +73,11 @@ initial_command() {
     fi
 }
 
-# Store initial command template
-RG_BASE_CMD="$RG --json {q} ${paths[*]}"
-echo "$RG_BASE_CMD" > /tmp/f-rg-cmd.$$
-trap "rm -f /tmp/f-rg-cmd.$$" EXIT
+# Store command template for editing
+CMD_FILE="/tmp/f-rg-cmd.$$"
+CURRENT_CMD="$RG --json {q} ${paths[*]}"
+echo "$CURRENT_CMD" > "$CMD_FILE"
+trap "rm -f $CMD_FILE" EXIT
 
 # Hack: to trigger display of initial results, we append a space then delete it on start
 initial_command "$pattern" |
@@ -85,14 +86,7 @@ initial_command "$pattern" |
         --query="$pattern " \
         --phony \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:bash -c \"\$(cat /tmp/f-rg-cmd.$$) | $DELTA\"" \
+        --bind="change:reload:$CURRENT_CMD | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --bind='ctrl-e:execute-silent(
-            echo "Edit command ({q} is the pattern placeholder):" > /dev/tty
-            current_cmd=$(cat /tmp/f-rg-cmd.$$)
-            read -e -p "> " -i "$current_cmd" new_cmd < /dev/tty
-            if [[ -n "$new_cmd" ]]; then
-                echo "$new_cmd" > /tmp/f-rg-cmd.$$
-            fi
-        )+reload(bash -c "$(cat /tmp/f-rg-cmd.$$) | '"$DELTA"'")' \
+        --bind='ctrl-e:execute:f-rg-edit-cmd '"$CMD_FILE"'' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
