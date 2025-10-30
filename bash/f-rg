@@ -1,85 +1,98 @@
 #!/bin/bash
 
-# Parse arguments: options until first non-option (pattern), then paths
+# Debug logging (disabled for now)
+# echo "f-rg started with args: $@" >> /tmp/f-rg-debug.log
+
+# Get absolute path to this script
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+if [[ ! "$SCRIPT_PATH" = /* ]]; then
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+fi
+
+# Parse arguments
 pattern=""
 paths=()
 rg_opts=""
+MODE="pattern"
 
-# Handle our custom --real-code-only first
-if [[ "$1" == "--real-code-only" ]]; then
-    rg_opts=' -g "!*.md" -g "!*_test*" -g "!*test_*" -g "!*mock*" -g "!openapiv*" -g "!*_gen.go" -g "!*_pb.go"'
+# Check for command mode flag
+if [[ "$1" == "--f-rg-command-mode" ]]; then
+    MODE="command"
     shift
 fi
 
-# Collect any leading options
+# Collect options
 while [[ $# -gt 0 && "$1" =~ ^- ]]; do
     opt="$1"
     rg_opts+=" $opt"
     shift
-    # Handle options that need an argument
     case "$opt" in
         -g|--glob|-t|--type|-e|--regexp)
-            if [[ $# -gt 0 ]]; then
-                # Preserve quotes for glob patterns
-                rg_opts+=" '$1'"
-                shift
-            fi
+            [[ $# -gt 0 ]] && rg_opts+=" '$1'" && shift
             ;;
     esac
 done
 
-# Next argument is the pattern
-if [[ $# -gt 0 ]]; then
-    pattern="$1"
-    shift
-fi
+# Pattern and paths
+[[ $# -gt 0 ]] && pattern="$1" && shift
+while [[ $# -gt 0 ]]; do paths+=("$1"); shift; done
+[[ ${#paths[@]} -eq 0 ]] && paths=(.)
 
-# Remaining arguments are paths
-while [[ $# -gt 0 ]]; do
-    paths+=("$1")
-    shift
-done
-
-# Default to current directory if no paths specified
-if [[ ${#paths[@]} -eq 0 ]]; then
-    paths=(".")
-fi
-
-rg_args="--follow -i --hidden -g '!.git/*'$rg_opts"
-RG="rg $rg_args --color=always"
-if [ -f .rg-config ]; then
-    RG="RIPGREP_CONFIG_PATH=.rg-config $RG"
-fi
-
+# Commands
+RG="rg --follow -i --hidden -g '!.git/*'$rg_opts --color=always"
 DELTA="delta --light --grep-output-type classic"
 
+# fzf wrapper
 fzf() {
-    command fzf \
-        --layout reverse \
-        --info hidden \
-        --prompt ' ' \
-        --color light \
-        --ansi \
-        --bind 'ctrl-k:kill-line' \
-        --bind 'alt-right:forward-word' \
-        --bind 'alt-left:backward-word' \
-        --preview-window 'up,70%' \
-        "$@"
+    command fzf --layout reverse --info hidden --prompt ' ' --color light --ansi \
+        --bind ctrl-k:kill-line --bind alt-right:forward-word --bind alt-left:backward-word \
+        --preview-window up,70% "$@"
 }
 
-initial_command() {
-    if [[ -n "$1" ]]; then
-        $RG --json "$1" "${paths[@]}" 2>/dev/null
-    fi
-}
+if [[ "$MODE" == "command" ]]; then
+    # Command mode - the query IS the full rg command
+    full_command="rg --follow -i --hidden -g '!.git/*'$rg_opts --json $pattern ${paths[*]}"
 
-# Hack: to trigger display of initial results, we append a space then delete it on start
-initial_command "$pattern" |
-    $DELTA |
+    # Hack: to trigger display we append a space and then delete it on start
+    echo "" |
+    fzf -d: \
+        --query="$full_command " \
+        --phony \
+        --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
+        --bind='start:backward-delete-char' \
+        --bind='change:reload:eval {q} 2>/dev/null | '"$DELTA" \
+        --bind='tab:execute:
+            # Extract the pattern and paths from the edited command
+            cmd="{q}"
+            # Simple extraction - get word after --json, strip quotes and backslashes
+            PATTERN=$(echo "$cmd" | sed -E "s/.*--json +([^ ]+).*/\1/;s/[\"'\''\\\\]//g")
+            # Extract paths - everything after the pattern
+            # First remove everything up to and including the pattern, and strip quotes
+            AFTER_PATTERN=$(echo "$cmd" | sed -E "s/.*--json +[^ ]+ *//;s/^[\"'\'']//;s/[\"'\'']$//")
+            if [[ -n "$AFTER_PATTERN" ]]; then
+                PATHS="$AFTER_PATTERN"
+            else
+                PATHS="${paths[*]}"
+            fi
+            # Kill parent fzf and start new instance
+            # echo "cmd=[$cmd] PATTERN=[$PATTERN] PATHS=[$PATHS]" >> /tmp/f-rg-debug.log
+            kill -TERM $PPID 2>/dev/null
+            '"$SCRIPT_PATH"' "$PATTERN" $PATHS' \
+        --bind='enter:execute:wormhole {1}:{2}' \
+        --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
+else
+    # Pattern mode - the query is just the search pattern
+    # Use --phony with start:reload to show initial results
+    # Hack: to trigger display we append a space and then delete it on start
+    echo "" |
     fzf -d: \
         --query="$pattern " \
         --phony \
+        --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:$RG --json {q} ${paths[*]} | $DELTA" \
+        --bind='change:reload:'"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
+        --bind='tab:execute:kill -TERM $PPID 2>/dev/null; '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
+        --header='rg --follow -i --hidden -g "!.git/*" --color=always {q} '"${paths[*]}" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
+fi
