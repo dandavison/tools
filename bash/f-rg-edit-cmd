@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Helper script for f-rg to edit the command
+# Minimal command editor for f-rg
 CMD_FILE="$1"
 
 if [[ ! -f "$CMD_FILE" ]]; then
@@ -8,68 +8,26 @@ if [[ ! -f "$CMD_FILE" ]]; then
     exit 1
 fi
 
-# Colors
-BOLD='\033[1m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[0;33m'
-DIM='\033[2m'
-NC='\033[0m' # No Color
-
-clear
-echo
-echo -e "${BOLD}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║                         EDIT SEARCH COMMAND                             ║${NC}"
-echo -e "${BOLD}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
-echo
-
 current_cmd=$(cat "$CMD_FILE")
 
-# Display current command with syntax highlighting
-echo -e "${BOLD}Current command:${NC}"
-echo -e "${DIM}┌──────────────────────────────────────────────────────────────────────────${NC}"
-echo -e "│ ${BLUE}${current_cmd/\{q\}/${YELLOW}\{q\}${BLUE}}${NC}"
-echo -e "${DIM}└──────────────────────────────────────────────────────────────────────────${NC}"
+clear
+echo "Edit command ({q} = search pattern):"
 echo
-
-# Explain what {q} means
-echo -e "${BOLD}Legend:${NC}"
-echo -e "  ${YELLOW}{q}${NC} = Your search pattern (what you type in the search box)"
+echo "$current_cmd"
 echo
+echo "(Press ↑ to edit current, Enter to keep, or type new)"
 
-# Show examples
-echo -e "${BOLD}Examples of modifications:${NC}"
-echo -e "  ${DIM}• Add path:${NC}      rg --follow -i --hidden --json {q} ${GREEN}src/ lib/${NC}"
-echo -e "  ${DIM}• Add glob:${NC}      rg --follow -i --hidden ${GREEN}-g '*.py'${NC} --json {q} ."
-echo -e "  ${DIM}• Case sensitive:${NC} rg --follow ${GREEN}--hidden${NC} --json {q} .  ${DIM}(remove -i)${NC}"
-echo
+# Add current command to history so up arrow works
+history -s "$current_cmd" 2>/dev/null
+read -e -p "> " new_cmd
 
-echo -e "${BOLD}Enter new command:${NC}"
-echo -e "${DIM}(Press Enter to keep current, Ctrl-C to cancel)${NC}"
-echo
-# Show the current command as the default
-printf "> "
-# Read with readline support
-read -e new_cmd
-
-# If user didn't enter anything, keep the current command
+# If empty, keep current
 if [[ -z "$new_cmd" ]]; then
     new_cmd="$current_cmd"
 fi
 
-echo
 if [[ "$new_cmd" != "$current_cmd" ]]; then
     echo "$new_cmd" > "$CMD_FILE"
-    echo -e "${GREEN}✓ Command updated successfully!${NC}"
     echo
-    echo -e "${DIM}New command:${NC} ${BLUE}${new_cmd/\{q\}/${YELLOW}\{q\}${BLUE}}${NC}"
-    echo
-    echo -e "${BOLD}Note:${NC} Your search will now use this new command."
-    echo -e "      The change will be visible when you type your next character."
-else
-    echo -e "${YELLOW}No changes made.${NC}"
+    echo "Updated."
 fi
-
-echo
-echo -e "${DIM}Press any key to return to search...${NC}"
-read -n 1 -s

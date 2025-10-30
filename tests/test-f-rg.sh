@@ -102,7 +102,7 @@ sleep 2
 output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
-if echo "$output" | grep -q "EDIT SEARCH COMMAND"; then
+if echo "$output" | grep -q "Edit command"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"
