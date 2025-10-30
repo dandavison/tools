@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Helper script for f-rg to edit the command
+CMD_FILE="$1"
+
+if [[ ! -f "$CMD_FILE" ]]; then
+    echo "Error: Command file not found" >&2
+    exit 1
+fi
+
+clear
+echo "================================="
+echo "  Edit ripgrep command"
+echo "================================="
+echo
+echo "Current command ({q} is the pattern placeholder):"
+echo
+
+current_cmd=$(cat "$CMD_FILE")
+echo "  $current_cmd"
+echo
+
+echo "Enter new command (or press Enter to keep current):"
+echo "Tip: Use Ctrl-A/E to move to beginning/end, Ctrl-W to delete word"
+echo
+# For macOS compatibility, we can't use -i option, so we'll use a different approach
+printf "> "
+# Use bash's read with -e for readline support
+read -e new_cmd
+# If user didn't enter anything, keep the current command
+if [[ -z "$new_cmd" ]]; then
+    new_cmd="$current_cmd"
+fi
+
+if [[ -n "$new_cmd" ]] && [[ "$new_cmd" != "$current_cmd" ]]; then
+    echo "$new_cmd" > "$CMD_FILE"
+    echo
+    echo "Command updated!"
+else
+    echo
+    echo "Command unchanged."
+fi
+
+echo
+echo "Press any key to return to search..."
+read -n 1 -s
