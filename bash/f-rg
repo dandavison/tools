@@ -1,11 +1,51 @@
 #!/bin/bash
 
-rg_args='-i --hidden -g "!.git/*"'
-if [ "$1" = "--exclude-tests" ]; then
-    rg_args+=' -g "!*test*" -g "!*mock*" -g "!openapiv*"'
+# Parse arguments: options until first non-option (pattern), then paths
+pattern=""
+paths=()
+rg_opts=""
+
+# Handle our custom --exclude-tests first
+if [[ "$1" == "--exclude-tests" ]]; then
+    rg_opts=' -g "!*test*" -g "!*mock*" -g "!openapiv*"'
     shift
 fi
 
+# Collect any leading options
+while [[ $# -gt 0 && "$1" =~ ^- ]]; do
+    opt="$1"
+    rg_opts+=" $opt"
+    shift
+    # Handle options that need an argument
+    case "$opt" in
+        -g|--glob|-t|--type|-e|--regexp)
+            if [[ $# -gt 0 ]]; then
+                # Preserve quotes for glob patterns
+                rg_opts+=" '$1'"
+                shift
+            fi
+            ;;
+    esac
+done
+
+# Next argument is the pattern
+if [[ $# -gt 0 ]]; then
+    pattern="$1"
+    shift
+fi
+
+# Remaining arguments are paths
+while [[ $# -gt 0 ]]; do
+    paths+=("$1")
+    shift
+done
+
+# Default to current directory if no paths specified
+if [[ ${#paths[@]} -eq 0 ]]; then
+    paths=(".")
+fi
+
+rg_args="--follow -i --hidden -g '!.git/*'$rg_opts"
 RG="rg $rg_args --color=always"
 if [ -f .rg-config ]; then
     RG="RIPGREP_CONFIG_PATH=.rg-config $RG"
@@ -27,21 +67,19 @@ fzf() {
         "$@"
 }
 
-RG_PATH="${RG_PATH:-.}"
-
 initial_command() {
     if [[ -n "$1" ]]; then
-        $RG --json "$*" "$RG_PATH" 2>/dev/null
+        $RG --json "$1" "${paths[@]}" 2>/dev/null
     fi
 }
 
 # Hack: to trigger display of initial results, we append a space then delete it on start
-initial_command "$@" |
+initial_command "$pattern" |
     $DELTA |
     fzf -d: \
-        --query="$* " \
+        --query="$pattern " \
         --phony \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:$RG --json {q} $RG_PATH | $DELTA" \
+        --bind="change:reload:$RG --json {q} ${paths[*]} | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
