@@ -87,28 +87,112 @@ run_test "Preview window displays" \
     "╭─"
 
 echo
-echo "=== Command Editing Tests ==="
+echo "=== Mode Switching Tests ==="
 echo
 
-# Test 8: Check if Ctrl-E shows edit screen
+# Test 8: Tab switches to command mode
 test_count=$((test_count + 1))
-echo -n "Test $test_count: Ctrl-E opens command editor... "
+echo -n "Test $test_count: Tab switches to command mode... "
 
-SESSION="test-ctrl-e-$$"
+SESSION="test-tab-$$"
 tmux new-session -d -s "$SESSION" "tools/bash/f-rg TODO ." 2>/dev/null
-sleep 1
-tmux send-keys -t "$SESSION" C-e 2>/dev/null
-sleep 2
+sleep 1.5
+tmux send-keys -t "$SESSION" Tab 2>/dev/null
+sleep 1.5
 output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
-tmux kill-session -t "$SESSION" 2>/dev/null || true
 
-if echo "$output" | grep -q "Edit command"; then
+# Check that mode switches correctly (results may briefly disappear)
+# 1. Header shows Command Mode
+# 2. Query line shows the full rg command
+if echo "$output" | grep -q "Command Mode" && \
+   echo "$output" | grep -q "rg.*--json.*TODO"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"
-    echo "  Expected to find edit command screen"
+    echo "  Expected: Command Mode header and full rg command in query"
+    if ! echo "$output" | grep -q "Command Mode"; then
+        echo "  - Missing 'Command Mode' in header"
+    fi
+    if ! echo "$output" | grep -q "rg.*--json"; then
+        echo "  - Missing full rg command in query line"
+    fi
     failed_count=$((failed_count + 1))
 fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# Test 9: Tab toggles back to pattern mode
+test_count=$((test_count + 1))
+echo -n "Test $test_count: Tab toggles back to pattern mode... "
+
+SESSION="test-toggle-$$"
+tmux new-session -d -s "$SESSION" "tools/bash/f-rg TODO ." 2>/dev/null
+sleep 1.5
+tmux send-keys -t "$SESSION" Tab 2>/dev/null  # Switch to command mode
+sleep 1.5
+tmux send-keys -t "$SESSION" Tab 2>/dev/null  # Switch back to pattern mode
+sleep 1.5
+output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
+
+if echo "$output" | grep -q "Pattern Mode" && \
+   ! echo "$output" | grep -q "rg.*--json"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "  Expected: Pattern Mode header and query should be just the pattern"
+    failed_count=$((failed_count + 1))
+fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# Test 10: Typing in command mode shows results
+test_count=$((test_count + 1))
+echo -n "Test $test_count: Typing in command mode shows results... "
+
+SESSION="test-type-$$"
+tmux new-session -d -s "$SESSION" "tools/bash/f-rg TODO ." 2>/dev/null
+sleep 1.5
+tmux send-keys -t "$SESSION" Tab 2>/dev/null  # Switch to command mode
+sleep 1.5
+# Add a space to trigger reload
+tmux send-keys -t "$SESSION" " " 2>/dev/null
+sleep 1.5
+output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
+
+if echo "$output" | grep -q "File:"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "  Expected to see results after typing in command mode"
+    failed_count=$((failed_count + 1))
+fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# Test 11: Editing command in command mode updates results
+test_count=$((test_count + 1))
+echo -n "Test $test_count: Editing command in command mode updates results... "
+
+SESSION="test-edit-$$"
+tmux new-session -d -s "$SESSION" "tools/bash/f-rg test ." 2>/dev/null
+sleep 1.5
+tmux send-keys -t "$SESSION" Tab 2>/dev/null  # Switch to command mode
+sleep 1.5
+# Clear the command and type a new one searching for TODO
+tmux send-keys -t "$SESSION" C-u 2>/dev/null  # Clear line
+tmux send-keys -t "$SESSION" "rg --follow -i --hidden -g '!.git/*' --json TODO ." 2>/dev/null
+sleep 2
+output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
+
+if echo "$output" | grep -q "TODO"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "  Expected to find 'TODO' in results after editing command"
+    failed_count=$((failed_count + 1))
+fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 echo
 echo "=== Results ==="

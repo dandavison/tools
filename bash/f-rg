@@ -73,17 +73,10 @@ initial_command() {
     fi
 }
 
-# Store command template for editing
-CMD_FILE="/tmp/f-rg-cmd.$$"
-CURRENT_CMD="$RG --json {q} ${paths[*]}"
-echo "$CURRENT_CMD" > "$CMD_FILE"
-trap "rm -f $CMD_FILE" EXIT
-
-# Build dynamic header
-build_header() {
-    local cmd=$(cat "$CMD_FILE" 2>/dev/null || echo "$CURRENT_CMD")
-    echo "Command: ${cmd/\{q\}/\{PATTERN\}} | Ctrl-E to edit | Ctrl-C to exit"
-}
+# State file for tracking mode
+STATE_FILE="/tmp/f-rg-state.$$"
+echo "pattern" > "$STATE_FILE"
+trap "rm -f $STATE_FILE" EXIT
 
 # Hack: to trigger display of initial results, we append a space then delete it on start
 initial_command "$pattern" |
@@ -92,8 +85,37 @@ initial_command "$pattern" |
         --query="$pattern " \
         --phony \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:$RG --json {q} ${paths[*]} | $DELTA" \
+        --bind='change:reload:
+            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
+            if [[ "$STATE" == "command" ]]; then
+                : # In command mode - execute the query as the full rg command
+                eval "{q}" 2>/dev/null | '"$DELTA"'
+            else
+                : # In pattern mode - use the pattern in the standard command
+                '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
+            fi
+        ' \
+        --bind='tab:execute-silent(
+            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
+            if [[ "$STATE" == "pattern" ]]; then
+                echo "command" > '"$STATE_FILE"'
+            else
+                echo "pattern" > '"$STATE_FILE"'
+            fi
+        )+transform:
+            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
+            if [[ "$STATE" == "command" ]]; then
+                : # Just switched to command mode - show full command
+                NEW_CMD="rg --follow -i --hidden -g '\''!.git/*'\''$rg_opts --json '\''{q}'\'' '"${paths[*]}"'"
+                echo "change-query($NEW_CMD)+change-header(Command Mode | Tab: back to pattern)"
+            else
+                : # Just switched to pattern mode - extract pattern
+                cmd="{q}"
+                PATTERN=$(echo "$cmd" | sed -n "s/.*--json  *[\"'\'']*\([^\"'\'' ]*\)[\"'\'']*.*/\1/p")
+                [[ -z "$PATTERN" ]] && PATTERN=""
+                echo "change-query($PATTERN)+change-header(Tab: edit command)"
+            fi
+        ' \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --bind='ctrl-e:execute:f-rg-edit-cmd '"$CMD_FILE"'' \
-        --header="$(build_header)" \
+        --header="Tab: edit command" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
