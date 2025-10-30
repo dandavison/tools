@@ -79,6 +79,12 @@ CURRENT_CMD="$RG --json {q} ${paths[*]}"
 echo "$CURRENT_CMD" > "$CMD_FILE"
 trap "rm -f $CMD_FILE" EXIT
 
+# Build dynamic header
+build_header() {
+    local cmd=$(cat "$CMD_FILE" 2>/dev/null || echo "$CURRENT_CMD")
+    echo "Command: ${cmd/\{q\}/\{PATTERN\}} | Ctrl-E to edit | Ctrl-C to exit"
+}
+
 # Hack: to trigger display of initial results, we append a space then delete it on start
 initial_command "$pattern" |
     $DELTA |
@@ -86,7 +92,8 @@ initial_command "$pattern" |
         --query="$pattern " \
         --phony \
         --bind='start:backward-delete-char' \
-        --bind="change:reload:$CURRENT_CMD | $DELTA" \
+        --bind="change:reload:$RG --json {q} ${paths[*]} | $DELTA" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --bind='ctrl-e:execute:f-rg-edit-cmd '"$CMD_FILE"'' \
+        --header="$(build_header)" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
