@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# test-interactive - Test interactive CLI programs by capturing their tmux output
+#
+# Usage: test-interactive <command> [sleep_time]
+#   command: The command to run (will be executed with bash -c)
+#   sleep_time: How long to wait before capturing (default 0.5 seconds)
+#
+# Example: 
+#   test-interactive "f-rg TODO ." 
+#   test-interactive "fzf --query=test" 1
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: $0 <command> [sleep_time]"
+    echo "Example: $0 'f-rg TODO .' 0.5"
+    exit 1
+fi
+
+COMMAND="$1"
+SLEEP_TIME="${2:-0.5}"
+SESSION_NAME="test-interactive-$$"
+
+# Check if tmux is available
+if ! command -v tmux &>/dev/null; then
+    echo "Error: tmux is not installed" >&2
+    exit 1
+fi
+
+# Kill any existing test session with same name (cleanup from failed runs)
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null
+
+echo "=== Testing: $COMMAND ===" >&2
+echo "=== Waiting ${SLEEP_TIME}s for UI to render ===" >&2
+
+# Create a detached tmux session running the command
+tmux new-session -d -s "$SESSION_NAME" -c "$(pwd)" "$COMMAND"
+
+# Wait for the UI to render
+sleep "$SLEEP_TIME"
+
+# Capture the pane content
+echo "=== Captured output ===" >&2
+tmux capture-pane -t "$SESSION_NAME" -p
+
+# Kill the session
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null
+
+echo "=== Test complete ===" >&2
