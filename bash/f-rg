@@ -5,9 +5,9 @@ pattern=""
 paths=()
 rg_opts=""
 
-# Handle our custom --exclude-tests first
-if [[ "$1" == "--exclude-tests" ]]; then
-    rg_opts=' -g "!*test*" -g "!*mock*" -g "!openapiv*"'
+# Handle our custom --real-code-only first
+if [[ "$1" == "--real-code-only" ]]; then
+    rg_opts=' -g "!*.md" -g "!*_test*" -g "!*test_*" -g "!*mock*" -g "!openapiv*" -g "!*_gen.go" -g "!*_pb.go"'
     shift
 fi
 
