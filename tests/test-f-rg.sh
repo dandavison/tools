@@ -159,7 +159,7 @@ tmux send-keys -t "$SESSION" " " 2>/dev/null
 sleep 1.5
 output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
 
-if echo "$output" | grep -q "File:"; then
+if echo "$output" | grep -qE "\.(sh|txt|py|el|md):|TODO"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"

@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Get the absolute path to this script
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+# If we still don't have an absolute path, try to construct it
+if [[ ! "$SCRIPT_PATH" = /* ]]; then
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+fi
+
 # Parse arguments: options until first non-option (pattern), then paths
 pattern=""
 paths=()
@@ -97,19 +104,20 @@ if [[ "$MODE" == "command" ]]; then
             if [[ "$cmd" != *"--json"* ]]; then
                 cmd="${cmd/rg /rg --json }"
             fi
-            # Execute the command using bash -c for proper quote handling
-            bash -c "$cmd" 2>/dev/null | '"$DELTA"'
+            # Execute the command
+            eval "$cmd" 2>/dev/null | '"$DELTA"'
         ' \
-        --bind='tab:execute:
-            # Switch back to pattern mode - extract pattern from command
-            cmd="{q}"
-            # Extract the pattern - find first non-option argument after rg
-            PATTERN=$(echo "$cmd" | sed -E "s/.*--json  *[\"'\'']?([^\"'\'' ]+)[\"'\'']?.*/\1/")
-            [[ -z "$PATTERN" ]] && PATTERN=""
+            --bind='tab:execute:
+                # Switch back to pattern mode - extract pattern from command
+                cmd="{q}"
+                # Extract the pattern more reliably - look for the quoted string after --json
+                # Handle both "pattern" and pattern formats
+                PATTERN=$(echo "$cmd" | grep -oE '\''--json\s+"[^"]+"|--json\s+[^ ]+'\'' | sed -E '\''s/--json\s+"?([^"]+)"?/\1/'\'')
+                [[ -z "$PATTERN" ]] && PATTERN=""
 
-            # Exec back to pattern mode with the same paths
-            exec tools/bash/f-rg $PATTERN '"${paths[*]}"'
-        ' \
+                # Exec back to pattern mode with the same paths
+                exec '"$SCRIPT_PATH"' "$PATTERN" '"${paths[*]}"'
+            ' \
         --bind='enter:execute:wormhole {1}:{2}' \
         --header="Command Mode | Tab: back to pattern | Enter: open" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
@@ -128,8 +136,14 @@ else
                 '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
             ' \
             --bind='tab:execute:
-                # Switch to command mode with current pattern
-                exec tools/bash/f-rg --f-rg-command-mode "{q}" '"${paths[*]}"'
+                # Switch to command mode with current pattern (remove any quotes from {q})
+                PATTERN="{q}"
+                # Remove surrounding quotes if present
+                PATTERN="${PATTERN%'"'"'}"
+                PATTERN="${PATTERN#'"'"'}"
+                PATTERN="${PATTERN%\"}"
+                PATTERN="${PATTERN#\"}"
+                exec '"$SCRIPT_PATH"' --f-rg-command-mode "$PATTERN" '"${paths[*]}"'
             ' \
             --bind='enter:execute:wormhole {1}:{2}' \
             --header="Pattern Mode | Tab: edit command | Enter: open" \
