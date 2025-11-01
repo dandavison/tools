@@ -67,10 +67,12 @@ if [[ "$MODE" == "command" ]]; then
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 else
     # Pattern mode - the query is just the search pattern
-    # Pipe initial results to fzf (no --phony, so it displays them)
-    $RG --json "$pattern" "${paths[@]}" 2>/dev/null | $DELTA |
+    # Use --phony with start:reload to show initial results
+    echo "" |
     fzf -d: \
         --query="$pattern" \
+        --phony \
+        --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='change:reload:'"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:exec '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
