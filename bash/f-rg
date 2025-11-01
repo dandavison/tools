@@ -93,11 +93,12 @@ if [[ "$MODE" == "command" ]]; then
     # Build the initial command to show in query
     initial_query="rg --follow -i --hidden -g \"!.git/*\"$rg_opts --json \"$pattern\" ${paths[*]}"
 
-    # No initial results in command mode
+    # Show the same initial results as pattern mode would have  
     echo "" |
     fzf -d: \
         --query="$initial_query" \
         --phony \
+        --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA"' \
         --bind='change:reload:
             cmd="{q}"
             # Add --json if not present and pipe to delta
@@ -107,33 +108,34 @@ if [[ "$MODE" == "command" ]]; then
             # Execute the command
             eval "$cmd" 2>/dev/null | '"$DELTA"'
         ' \
-            --bind='tab:execute:
+        --bind='tab:execute:
                 # Switch back to pattern mode - extract pattern from command
                 cmd="{q}"
-                # Extract the pattern more reliably - look for the quoted string after --json
-                # Handle both "pattern" and pattern formats
-                PATTERN=$(echo "$cmd" | grep -oE '\''--json\s+"[^"]+"|--json\s+[^ ]+'\'' | sed -E '\''s/--json\s+"?([^"]+)"?/\1/'\'')
+                # Simple extraction - just grab the word after --json
+                PATTERN=$(echo "$cmd" | awk "{for(i=1;i<=NF;i++) if(\$i==\"--json\") {print \$(i+1); exit}}")
+                # Remove quotes if present
+                PATTERN="${PATTERN%\"}"
+                PATTERN="${PATTERN#\"}"
                 [[ -z "$PATTERN" ]] && PATTERN=""
 
                 # Exec back to pattern mode with the same paths
                 exec '"$SCRIPT_PATH"' "$PATTERN" '"${paths[*]}"'
             ' \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --header="Command Mode | Tab: back to pattern | Enter: open" \
+        --header='Command Mode' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 else
     # Pattern mode - the query is just the search pattern
 
-    # Hack: to trigger display of initial results, we append a space then delete it on start
-    initial_command "$pattern" |
-        $DELTA |
+    # We need to use reload to show initial results with --phony
+    echo "" |
         fzf -d: \
-            --query="$pattern " \
+            --query="$pattern" \
             --phony \
-            --bind='start:backward-delete-char' \
+            --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA"' \
             --bind='change:reload:
-                # Use the pattern in the standard command
-                '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
+            # Use the pattern in the standard command
+            '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
             ' \
             --bind='tab:execute:
                 # Switch to command mode with current pattern (remove any quotes from {q})
@@ -145,7 +147,7 @@ else
                 PATTERN="${PATTERN#\"}"
                 exec '"$SCRIPT_PATH"' --f-rg-command-mode "$PATTERN" '"${paths[*]}"'
             ' \
-            --bind='enter:execute:wormhole {1}:{2}' \
-            --header="Pattern Mode | Tab: edit command | Enter: open" \
-            --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
+        --bind='enter:execute:wormhole {1}:{2}' \
+        --header='rg --follow -i --hidden -g "!.git/*"'"$rg_opts"' --json {q} '"${paths[*]}" \
+        --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 fi
