@@ -53,11 +53,13 @@ if [[ "$MODE" == "command" ]]; then
     # Command mode - the query IS the full rg command
     full_command="rg --follow -i --hidden -g '!.git/*'$rg_opts --json $pattern ${paths[*]}"
 
+    # Hack: to trigger display we append a space and then delete it on start
     echo "" |
     fzf -d: \
-        --query="$full_command" \
+        --query="$full_command " \
         --phony \
         --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
+        --bind='start:backward-delete-char' \
         --bind='change:reload:eval {q} 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:
             # Extract the pattern and paths from the edited command
@@ -81,11 +83,13 @@ if [[ "$MODE" == "command" ]]; then
 else
     # Pattern mode - the query is just the search pattern
     # Use --phony with start:reload to show initial results
+    # Hack: to trigger display we append a space and then delete it on start
     echo "" |
     fzf -d: \
-        --query="$pattern" \
+        --query="$pattern " \
         --phony \
         --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
+        --bind='start:backward-delete-char' \
         --bind='change:reload:'"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:kill -TERM $PPID 2>/dev/null; '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
