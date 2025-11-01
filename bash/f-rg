@@ -48,14 +48,14 @@ fzf() {
 
 if [[ "$MODE" == "command" ]]; then
     # Command mode - the query IS the full rg command
-    full_command="rg --follow -i --hidden -g '!.git/*'$rg_opts --json \"$pattern\" ${paths[*]}"
+    full_command="rg --follow -i --hidden -g '!.git/*'$rg_opts --json $pattern ${paths[*]}"
 
     echo "" |
     fzf -d: \
         --query="$full_command" \
         --phony \
         --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
-        --bind='change:reload:eval "{q}" 2>/dev/null | '"$DELTA" \
+        --bind='change:reload:eval {q} 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:
             # Extract the pattern after --json (may have been edited by user)
             cmd="{q}"
