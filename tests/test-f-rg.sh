@@ -104,18 +104,11 @@ output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
 # Check that mode switches correctly (results may briefly disappear)
 # 1. Header shows Command Mode
 # 2. Query line shows the full rg command
-if echo "$output" | grep -q "Command Mode" && \
-   echo "$output" | grep -q "rg.*--json.*TODO"; then
+if echo "$output" | grep -q "rg.*--json.*TODO"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"
-    echo "  Expected: Command Mode header and full rg command in query"
-    if ! echo "$output" | grep -q "Command Mode"; then
-        echo "  - Missing 'Command Mode' in header"
-    fi
-    if ! echo "$output" | grep -q "rg.*--json"; then
-        echo "  - Missing full rg command in query line"
-    fi
+    echo "  Expected: Full rg command with --json in query"
     failed_count=$((failed_count + 1))
 fi
 
@@ -134,12 +127,12 @@ tmux send-keys -t "$SESSION" Tab 2>/dev/null  # Switch back to pattern mode
 sleep 1.5
 output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
 
-if echo "$output" | grep -q "Pattern Mode" && \
+if echo "$output" | grep -q "rg --follow" && \
    ! echo "$output" | grep -q "rg.*--json"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"
-    echo "  Expected: Pattern Mode header and query should be just the pattern"
+    echo "  Expected: rg command header without --json"
     failed_count=$((failed_count + 1))
 fi
 
@@ -215,12 +208,12 @@ sleep 1.5
 output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
 
 # Check if header shows shell-config instead of .
-if echo "$output" | grep -q "Pattern Mode.*shell-config"; then
+if echo "$output" | grep -q "rg.*shell-config"; then
     echo -e "${GREEN}PASS${NC}"
 else
     echo -e "${RED}FAIL${NC}"
-    echo "  Expected: Pattern Mode header should show 'shell-config' after editing in command mode"
-    echo "  Got: $(echo "$output" | grep "Pattern Mode" | head -1)"
+    echo "  Expected: rg command header should show 'shell-config' after editing in command mode"
+    echo "  Got: $(echo "$output" | grep "rg --follow" | head -1)"
     failed_count=$((failed_count + 1))
 fi
 

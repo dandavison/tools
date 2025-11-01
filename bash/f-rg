@@ -77,7 +77,6 @@ if [[ "$MODE" == "command" ]]; then
             kill -TERM $PPID 2>/dev/null
             '"$SCRIPT_PATH"' "$PATTERN" $PATHS' \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --header='Command Mode: Edit the full rg command' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 else
     # Pattern mode - the query is just the search pattern
@@ -90,6 +89,6 @@ else
         --bind='change:reload:'"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:kill -TERM $PPID 2>/dev/null; '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --header='Pattern Mode: Searching for {q} in '"${paths[*]}" \
+        --header='rg --follow -i --hidden -g "!.git/*" --color=always {q} '"${paths[*]}" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 fi
