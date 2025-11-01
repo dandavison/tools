@@ -50,17 +50,12 @@ if [[ "$MODE" == "command" ]]; then
     # Command mode - the query IS the full rg command
     full_command="rg --follow -i --hidden -g '!.git/*'$rg_opts --json \"$pattern\" ${paths[*]}"
 
-    $RG --json "$pattern" "${paths[@]}" 2>/dev/null | $DELTA |
+    echo "" |
     fzf -d: \
         --query="$full_command" \
-        --bind='change:reload:
-            cmd="{q}"
-            # Add --json if not present
-            if [[ "$cmd" != *"--json"* ]]; then
-                cmd="${cmd/rg /rg --json }"
-            fi
-            # Execute the command
-            eval "$cmd" 2>/dev/null | '"$DELTA" \
+        --phony \
+        --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
+        --bind='change:reload:eval "{q}" 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:
             # Extract the pattern after --json (may have been edited by user)
             cmd="{q}"
@@ -72,6 +67,7 @@ if [[ "$MODE" == "command" ]]; then
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 else
     # Pattern mode - the query is just the search pattern
+    # Pipe initial results to fzf (no --phony, so it displays them)
     $RG --json "$pattern" "${paths[@]}" 2>/dev/null | $DELTA |
     fzf -d: \
         --query="$pattern" \
