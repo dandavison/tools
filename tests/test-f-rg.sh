@@ -194,6 +194,38 @@ fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
+# Test 12: Path retention when switching modes
+test_count=$((test_count + 1))
+echo -n "Test $test_count: Path changes are retained when switching modes... "
+
+SESSION="test-path-retention-$$"
+tmux new-session -d -s "$SESSION" "tools/bash/f-rg TODO ." 2>/dev/null
+sleep 1.5
+# Switch to command mode
+tmux send-keys -t "$SESSION" Tab 2>/dev/null
+sleep 1.5
+# Edit command to change . to shell-config
+tmux send-keys -t "$SESSION" C-e 2>/dev/null  # Go to end
+tmux send-keys -t "$SESSION" BSpace 2>/dev/null  # Delete .
+tmux send-keys -t "$SESSION" "shell-config" 2>/dev/null
+sleep 1.5
+# Switch back to pattern mode
+tmux send-keys -t "$SESSION" Tab 2>/dev/null
+sleep 1.5
+output=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)
+
+# Check if header shows shell-config instead of .
+if echo "$output" | grep -q "Pattern Mode.*shell-config"; then
+    echo -e "${GREEN}PASS${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "  Expected: Pattern Mode header should show 'shell-config' after editing in command mode"
+    echo "  Got: $(echo "$output" | grep "Pattern Mode" | head -1)"
+    failed_count=$((failed_count + 1))
+fi
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
 echo
 echo "=== Results ==="
 echo "Total tests: $test_count"

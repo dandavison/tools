@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Debug logging
-echo "f-rg started with args: $@" >> /tmp/f-rg-debug.log
+# Debug logging (disabled for now)
+# echo "f-rg started with args: $@" >> /tmp/f-rg-debug.log
 
 # Get absolute path to this script
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -60,14 +60,22 @@ if [[ "$MODE" == "command" ]]; then
         --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='change:reload:eval {q} 2>/dev/null | '"$DELTA" \
         --bind='tab:execute:
-            # Extract the pattern after --json (may have been edited by user)
+            # Extract the pattern and paths from the edited command
             cmd="{q}"
             # Simple extraction - get word after --json, strip quotes and backslashes
             PATTERN=$(echo "$cmd" | sed -E "s/.*--json +([^ ]+).*/\1/;s/[\"'\''\\\\]//g")
+            # Extract paths - everything after the pattern
+            # First remove everything up to and including the pattern, and strip quotes
+            AFTER_PATTERN=$(echo "$cmd" | sed -E "s/.*--json +[^ ]+ *//;s/^[\"'\'']//;s/[\"'\'']$//")
+            if [[ -n "$AFTER_PATTERN" ]]; then
+                PATHS="$AFTER_PATTERN"
+            else
+                PATHS="${paths[*]}"
+            fi
             # Kill parent fzf and start new instance
-            echo "cmd=[$cmd] PATTERN=[$PATTERN]" >> /tmp/f-rg-debug.log
+            # echo "cmd=[$cmd] PATTERN=[$PATTERN] PATHS=[$PATHS]" >> /tmp/f-rg-debug.log
             kill -TERM $PPID 2>/dev/null
-            '"$SCRIPT_PATH"' "$PATTERN" '"${paths[*]}" \
+            '"$SCRIPT_PATH"' "$PATTERN" $PATHS' \
         --bind='enter:execute:wormhole {1}:{2}' \
         --header='Command Mode: Edit the full rg command' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
