@@ -11,6 +11,13 @@ if [[ "$1" == "--real-code-only" ]]; then
     shift
 fi
 
+# Check if we're in command mode (special flag)
+MODE="pattern"
+if [[ "$1" == "--f-rg-command-mode" ]]; then
+    MODE="command"
+    shift
+fi
+
 # Collect any leading options
 while [[ $# -gt 0 && "$1" =~ ^- ]]; do
     opt="$1"
@@ -73,48 +80,58 @@ initial_command() {
     fi
 }
 
-# State file for tracking mode
-STATE_FILE="/tmp/f-rg-state.$$"
-echo "pattern" > "$STATE_FILE"
-trap "rm -f $STATE_FILE" EXIT
+if [[ "$MODE" == "command" ]]; then
+    # Command mode - the query IS the full rg command
 
-# Hack: to trigger display of initial results, we append a space then delete it on start
-initial_command "$pattern" |
-    $DELTA |
+    # Build the initial command to show in query
+    initial_query="rg --follow -i --hidden -g \"!.git/*\"$rg_opts --json \"$pattern\" ${paths[*]}"
+
+    # No initial results in command mode
+    echo "" |
     fzf -d: \
-        --query="$pattern " \
+        --query="$initial_query" \
         --phony \
-        --bind='start:backward-delete-char' \
         --bind='change:reload:
-            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
-            if [[ "$STATE" == "command" ]]; then
-                : # In command mode - execute the query as the full rg command
-                eval "{q}" 2>/dev/null | '"$DELTA"'
-            else
-                : # In pattern mode - use the pattern in the standard command
-                '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
+            cmd="{q}"
+            # Add --json if not present and pipe to delta
+            if [[ "$cmd" != *"--json"* ]]; then
+                cmd="${cmd/rg /rg --json }"
             fi
+            # Execute the command using bash -c for proper quote handling
+            bash -c "$cmd" 2>/dev/null | '"$DELTA"'
         ' \
-        --bind='tab:execute-silent(
-            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
-            if [[ "$STATE" == "pattern" ]]; then
-                echo "command" > '"$STATE_FILE"'
-            else
-                echo "pattern" > '"$STATE_FILE"'
-            fi
-        )+transform:
-            STATE=$(cat '"$STATE_FILE"' 2>/dev/null || echo "pattern")
-            if [[ "$STATE" == "command" ]]; then
-                : # Just switched to command mode - show full command
-                NEW_CMD="rg --follow -i --hidden -g '\''!.git/*'\''$rg_opts --json '\''{q}'\'' '"${paths[*]}"'"
-                echo "change-query($NEW_CMD)+change-header(Command Mode | Tab: back to pattern)"
-            else
-                : # Just switched to pattern mode - extract pattern
-                cmd="{q}"
-                PATTERN=$(echo "$cmd" | sed -n "s/.*--json  *[\"'\'']*\([^\"'\'' ]*\)[\"'\'']*.*/\1/p")
-                [[ -z "$PATTERN" ]] && PATTERN=""
-                echo "change-query($PATTERN)+change-header(Tab: edit command)"
-            fi
+        --bind='tab:execute:
+            # Switch back to pattern mode - extract pattern from command
+            cmd="{q}"
+            # Extract the pattern - find first non-option argument after rg
+            PATTERN=$(echo "$cmd" | sed -E "s/.*--json  *[\"'\'']?([^\"'\'' ]+)[\"'\'']?.*/\1/")
+            [[ -z "$PATTERN" ]] && PATTERN=""
+
+            # Exec back to pattern mode with the same paths
+            exec tools/bash/f-rg $PATTERN '"${paths[*]}"'
         ' \
         --bind='enter:execute:wormhole {1}:{2}' \
+        --header="Command Mode | Tab: back to pattern | Enter: open" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
+else
+    # Pattern mode - the query is just the search pattern
+
+    # Hack: to trigger display of initial results, we append a space then delete it on start
+    initial_command "$pattern" |
+        $DELTA |
+        fzf -d: \
+            --query="$pattern " \
+            --phony \
+            --bind='start:backward-delete-char' \
+            --bind='change:reload:
+                # Use the pattern in the standard command
+                '"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA"'
+            ' \
+            --bind='tab:execute:
+                # Switch to command mode with current pattern
+                exec tools/bash/f-rg --f-rg-command-mode "{q}" '"${paths[*]}"'
+            ' \
+            --bind='enter:execute:wormhole {1}:{2}' \
+            --header="Pattern Mode | Tab: edit command | Enter: open" \
+            --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
+fi
