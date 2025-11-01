@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Debug logging
+echo "f-rg started with args: $@" >> /tmp/f-rg-debug.log
+
 # Get absolute path to this script
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 if [[ ! "$SCRIPT_PATH" = /* ]]; then
@@ -59,9 +62,12 @@ if [[ "$MODE" == "command" ]]; then
         --bind='tab:execute:
             # Extract the pattern after --json (may have been edited by user)
             cmd="{q}"
-            # Simple extraction: word after --json
-            PATTERN=$(echo "$cmd" | sed -E "s/.*--json[[:space:]]+([\"'\'']*)?([^[:space:]\"'\'']+).*/\2/")
-            exec '"$SCRIPT_PATH"' "$PATTERN" '"${paths[*]}" \
+            # Simple extraction - get word after --json, strip quotes and backslashes
+            PATTERN=$(echo "$cmd" | sed -E "s/.*--json +([^ ]+).*/\1/;s/[\"'\''\\\\]//g")
+            # Kill parent fzf and start new instance
+            echo "cmd=[$cmd] PATTERN=[$PATTERN]" >> /tmp/f-rg-debug.log
+            kill -TERM $PPID 2>/dev/null
+            '"$SCRIPT_PATH"' "$PATTERN" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
         --header='Command Mode: Edit the full rg command' \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
@@ -74,8 +80,8 @@ else
         --phony \
         --bind='start:reload:'"$RG"' --json "'"$pattern"'" '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
         --bind='change:reload:'"$RG"' --json {q} '"${paths[*]}"' 2>/dev/null | '"$DELTA" \
-        --bind='tab:execute:exec '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
+        --bind='tab:execute:kill -TERM $PPID 2>/dev/null; '"$SCRIPT_PATH"' --f-rg-command-mode "{q}" '"${paths[*]}" \
         --bind='enter:execute:wormhole {1}:{2}' \
-        --header='Pattern Mode: '"$RG"' --json {q} '"${paths[*]}" \
+        --header='Pattern Mode: Searching for {q} in '"${paths[*]}" \
         --preview="[[ -n {1} ]] && f-rg-preview {1} {2}"
 fi
