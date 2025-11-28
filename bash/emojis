@@ -1,0 +1,44 @@
+#!/bin/bash
+# List emojis from Apple Color Emoji font.
+# Run in a terminal to see which render as colorful emoji vs text glyphs.
+
+set -euo pipefail
+
+# Get charset from Apple Color Emoji, expand ranges, print each emoji
+fc-query --format='%{charset}\n' "/System/Library/Fonts/Apple Color Emoji.ttc" 2>/dev/null |
+    head -1 |
+    tr ' ' '\n' |
+    while IFS= read -r range; do
+        if [[ "$range" == *-* ]]; then
+            start="${range%-*}"
+            end="${range#*-}"
+            start_dec=$((16#$start))
+            end_dec=$((16#$end))
+            for ((i = start_dec; i <= end_dec; i++)); do
+                printf '%04X\n' "$i"
+            done
+        else
+            echo "$range"
+        fi
+    done |
+    # Filter to printable emoji range (skip control chars, variation selectors, etc.)
+    while IFS= read -r hex; do
+        cp=$((16#$hex))
+        # Skip: ASCII, control chars, combining marks, variation selectors, ZWJ, tags
+        ((cp < 0x00A9)) && continue
+        ((cp == 0x200D)) && continue  # ZWJ
+        ((cp == 0x20E3)) && continue  # combining enclosing keycap
+        ((cp >= 0xFE00 && cp <= 0xFE0F)) && continue  # variation selectors
+        ((cp >= 0xE0000 && cp <= 0xE007F)) && continue  # tags
+        echo "$hex"
+    done |
+    # Print in columns: CODEPOINT EMOJI
+    while IFS= read -r hex; do
+        dec=$((16#$hex))
+        # Use perl to emit the Unicode character (bash printf doesn't handle \u well)
+        char=$(perl -CS -e "print chr($dec)")
+        printf 'U+%04X %s\n' "$dec" "$char"
+    done |
+    # Display in 12 columns for easier scanning
+    paste - - - - - - - - - - - -
+
