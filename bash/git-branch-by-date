@@ -19,7 +19,7 @@ set -u
 
 format='%(refname)@%(committerdate:relative)'
 
-if [ -n "$flag" ] && $(git remote | grep -q "$flag") ; then
+if [ -n "$flag" ] && git remote | grep -q "$flag" ; then
     refs=refs/remotes/$flag
     if [ "$flag" = origin ]; then
         format='%(refname)@%(committername)@%(committerdate:relative)'
