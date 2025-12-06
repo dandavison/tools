@@ -184,6 +184,30 @@ print("test output")
         assert result.returncode == 0
         assert "test output" in result.stdout
 
+    def test_code_block_with_uv_script_dependencies(self, tmp_path):
+        """Run code block that itself has uv script dependency headers."""
+        md_file = tmp_path / "test_with_deps.md"
+        # Code block contains a uv script with its own dependencies
+        md_file.write_text('''
+# Script with dependencies
+
+```python
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["cowsay"]
+# ///
+import cowsay
+cowsay.cow("moo from python-md")
+```
+''')
+        result = subprocess.run(
+            [str(SCRIPT_PATH), str(md_file)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "moo from python-md" in result.stdout
+
 
 if __name__ == "__main__":
     # Run with: ./test_python_md.py
