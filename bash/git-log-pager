@@ -1,0 +1,21 @@
+#!/bin/bash
+trap 'exit 0' INT PIPE
+rg -v '^ [0-9]+ files? changed' | sed $'s/Dan Davison /\e[31m&\e[0m/' | delta
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

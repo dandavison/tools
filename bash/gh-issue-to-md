@@ -1,0 +1,74 @@
+#!/bin/bash
+
+set -e
+
+if [[ -z "$1" ]]; then
+    echo "Usage: gh-issue-to-md <issue-url>" >&2
+    exit 1
+fi
+
+url="$1"
+
+# Parse GitHub issue URL
+# Supports: https://github.com/owner/repo/issues/123
+if [[ "$url" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+    issue_number="${BASH_REMATCH[3]}"
+else
+    echo "Error: Invalid GitHub issue URL" >&2
+    echo "Expected format: https://github.com/owner/repo/issues/123" >&2
+    exit 1
+fi
+
+api_path="/repos/$owner/$repo/issues/$issue_number"
+
+# Fetch issue details
+issue=$(gh api "$api_path")
+title=$(echo "$issue" | jq -r '.title')
+body=$(echo "$issue" | jq -r '.body // ""')
+author=$(echo "$issue" | jq -r '.user.login')
+created_at=$(echo "$issue" | jq -r '.created_at')
+
+# Output issue title and body
+echo "# $title"
+echo
+echo "*Issue by @$author on $created_at*"
+echo
+if [[ -n "$body" && "$body" != "null" ]]; then
+    echo "$body"
+    echo
+fi
+
+# Fetch and output comments
+comments=$(gh api "$api_path/comments" --paginate)
+comment_count=$(echo "$comments" | jq -r 'length')
+
+if [[ "$comment_count" -gt 0 ]]; then
+    echo "---"
+    echo
+    echo "## Comments"
+    echo
+
+    echo "$comments" | jq -c '.[]' | while read -r comment; do
+        comment_author=$(echo "$comment" | jq -r '.user.login')
+        comment_created=$(echo "$comment" | jq -r '.created_at')
+        comment_body=$(echo "$comment" | jq -r '.body // ""')
+
+        echo "### @$comment_author on $comment_created"
+        echo
+        if [[ -n "$comment_body" && "$comment_body" != "null" ]]; then
+            echo "$comment_body"
+        fi
+        echo
+    done
+fi
+
+
+
+
+
+
+
+
+
