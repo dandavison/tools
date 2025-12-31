@@ -11,6 +11,15 @@ from typing import Iterable, Iterator
 
 import typer  # type: ignore
 
+app = typer.Typer()
+
+
+@app.callback(invoke_without_command=True)
+def callback(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        raise typer.Exit(ctx.get_help())
+
+
 WORDS_FILE = Path(__file__).resolve().parent / "typing-practice-words.txt"
 
 
@@ -45,14 +54,18 @@ def coalesce(
 def coalesced_ngrams(
     letters: str, ngram_length: int, word_length: int = 6, repeat: int = 1
 ):
-    WORDS = WORDS_FILE.read_text().splitlines()
-    ngrams = list(ngrams_from_words(WORDS, ngram_length, letters))
+    ngrams = list(ngrams_from_words(get_words(), ngram_length, letters))
     ngrams = random.choices(ngrams, k=1000)
     for w in coalesce(zip(ngrams, ngrams[1:]), word_length, repeat):
         print(w, end=" ")
 
 
-def main(
+def get_words(k=1000) -> list[str]:
+    return WORDS_FILE.read_text().splitlines()[:k]
+
+
+@app.command()
+def ngrams(
     letters: str = "asertdloniuy",
     ngram_length: int = 2,
     word_length: int = 6,
@@ -70,8 +83,15 @@ def main(
 HARD_WORDS = ["dsatdsat", "ssadssad", "adetadet"]
 
 
+@app.command()
+def words(repeat: int = 1):
+    for w in random.choices(get_words(), k=100):
+        for _ in range(repeat):
+            print(w, end=" ")
+
+
 if __name__ == "__main__":
     import signal
 
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    typer.run(main)
+    app()
