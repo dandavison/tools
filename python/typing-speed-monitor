@@ -23,12 +23,12 @@ from threading import Lock
 from pynput import keyboard
 
 # Configuration
-DEFAULT_WPM_THRESHOLD = 25
+DEFAULT_WPM_THRESHOLD = 40
 DEFAULT_WINDOW_SECONDS = 10  # Calculate WPM over this rolling window
 DEFAULT_COOLDOWN_SECONDS = 30  # Don't spam notifications
 CHARS_PER_WORD = 5  # Standard WPM calculation
 MIN_CHARS_FOR_WPM = (
-    15  # Need at least this many chars to calculate WPM (avoids false positives)
+    30  # Need at least this many chars to calculate WPM (avoids false positives)
 )
 
 
@@ -70,13 +70,10 @@ class TypingSpeedMonitor:
 
             char_count = len(self.keypress_times)
 
-        if char_count < MIN_CHARS_FOR_WPM:
-            return 0.0
-
-        # Calculate time span of actual typing (from first to last keypress in window)
-        with self.lock:
-            if len(self.keypress_times) < MIN_CHARS_FOR_WPM:
+            if char_count < MIN_CHARS_FOR_WPM:
                 return 0.0
+
+            # Time from first to last keypress in window
             time_span = self.keypress_times[-1] - self.keypress_times[0]
 
         if time_span <= 0:
@@ -89,12 +86,11 @@ class TypingSpeedMonitor:
 
     def on_press(self, key):
         """Handle keypress events."""
-        # Only count actual character keys, not modifiers
+        # Only count actual character keys, not modifiers or backspace
         if isinstance(key, keyboard.KeyCode) or key in (
             keyboard.Key.space,
             keyboard.Key.enter,
             keyboard.Key.tab,
-            keyboard.Key.backspace,
         ):
             now = time.time()
 
