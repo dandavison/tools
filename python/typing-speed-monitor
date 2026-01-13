@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --script
+#!/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/bin/python3.11
 #
 # /// script
 # requires-python = ">=3.9"
