@@ -1,0 +1,171 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pynput"]
+# ///
+#
+"""
+Typing Speed Monitor - Alerts when typing exceeds a WPM threshold.
+
+Useful for learning proper typing technique: if you're typing too fast,
+you've probably fallen back to your old habits!
+
+macOS: Grant Accessibility permissions to your terminal in System Settings > Privacy & Security > Accessibility
+"""
+
+import argparse
+import subprocess
+import time
+from collections import deque
+from threading import Lock
+
+from pynput import keyboard
+
+# Configuration
+DEFAULT_WPM_THRESHOLD = 25
+DEFAULT_WINDOW_SECONDS = 10  # Calculate WPM over this rolling window
+DEFAULT_COOLDOWN_SECONDS = 30  # Don't spam notifications
+CHARS_PER_WORD = 5  # Standard WPM calculation
+MIN_CHARS_FOR_WPM = (
+    15  # Need at least this many chars to calculate WPM (avoids false positives)
+)
+
+
+class TypingSpeedMonitor:
+    def __init__(self, wpm_threshold: int, window_seconds: int, cooldown_seconds: int):
+        self.wpm_threshold = wpm_threshold
+        self.window_seconds = window_seconds
+        self.cooldown_seconds = cooldown_seconds
+
+        self.keypress_times: deque[float] = deque()
+        self.lock = Lock()
+        self.last_notification_time = 0
+        self.running = True
+
+    def notify(self, title: str, message: str):
+        """Send a macOS desktop notification."""
+        subprocess.run(
+            [
+                "terminal-notifier",
+                "-title",
+                title,
+                "-message",
+                message,
+                "-sound",
+                "Funk",
+            ],
+            capture_output=True,
+        )
+
+    def calculate_wpm(self) -> float:
+        """Calculate WPM from keypresses in the current window."""
+        now = time.time()
+        cutoff = now - self.window_seconds
+
+        with self.lock:
+            # Remove old keypresses outside the window
+            while self.keypress_times and self.keypress_times[0] < cutoff:
+                self.keypress_times.popleft()
+
+            char_count = len(self.keypress_times)
+
+        if char_count < MIN_CHARS_FOR_WPM:
+            return 0.0
+
+        # Calculate time span of actual typing (from first to last keypress in window)
+        with self.lock:
+            if len(self.keypress_times) < MIN_CHARS_FOR_WPM:
+                return 0.0
+            time_span = self.keypress_times[-1] - self.keypress_times[0]
+
+        if time_span <= 0:
+            return 0.0
+
+        # WPM = (characters / 5) / minutes
+        minutes = time_span / 60
+        words = char_count / CHARS_PER_WORD
+        return words / minutes
+
+    def on_press(self, key):
+        """Handle keypress events."""
+        # Only count actual character keys, not modifiers
+        if isinstance(key, keyboard.KeyCode) or key in (
+            keyboard.Key.space,
+            keyboard.Key.enter,
+            keyboard.Key.tab,
+            keyboard.Key.backspace,
+        ):
+            now = time.time()
+
+            with self.lock:
+                self.keypress_times.append(now)
+
+            wpm = self.calculate_wpm()
+
+            # Check if we should alert
+            if wpm > self.wpm_threshold:
+                if now - self.last_notification_time > self.cooldown_seconds:
+                    self.last_notification_time = now
+                    self.notify("🛑", f"{wpm:.0f} WPM!")
+                    print(
+                        f"⚠️  Alert: {wpm:.0f} WPM exceeds {self.wpm_threshold} WPM threshold"
+                    )
+
+    def run(self):
+        """Start monitoring keyboard input."""
+        print("🎹 Typing Speed Monitor")
+        print(f"   Threshold: {self.wpm_threshold} WPM")
+        print(f"   Window: {self.window_seconds}s rolling average")
+        print(f"   Cooldown: {self.cooldown_seconds}s between alerts")
+        print(f"   Min chars: {MIN_CHARS_FOR_WPM} (before calculating WPM)")
+        print()
+        print("Monitoring... (Ctrl+C to stop)")
+        print()
+
+        with keyboard.Listener(on_press=self.on_press) as listener:
+            try:
+                listener.join()
+            except KeyboardInterrupt:
+                print("\n👋 Stopped monitoring")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Monitor typing speed and alert when exceeding threshold",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        type=int,
+        default=DEFAULT_WPM_THRESHOLD,
+        help="WPM threshold to trigger alert",
+    )
+    parser.add_argument(
+        "-w",
+        "--window",
+        type=int,
+        default=DEFAULT_WINDOW_SECONDS,
+        help="Rolling window in seconds for WPM calculation",
+    )
+    parser.add_argument(
+        "-c",
+        "--cooldown",
+        type=int,
+        default=DEFAULT_COOLDOWN_SECONDS,
+        help="Seconds between notifications",
+    )
+
+    args = parser.parse_args()
+
+    monitor = TypingSpeedMonitor(
+        wpm_threshold=args.threshold,
+        window_seconds=args.window,
+        cooldown_seconds=args.cooldown,
+    )
+    monitor.run()
+
+
+if __name__ == "__main__":
+    main()
