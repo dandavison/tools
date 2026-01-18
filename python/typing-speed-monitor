@@ -23,25 +23,51 @@ from threading import Lock
 from pynput import keyboard
 
 # Configuration
-DEFAULT_WPM_THRESHOLD = 40
+DEFAULT_WPM_THRESHOLD = 50
 DEFAULT_WINDOW_SECONDS = 10  # Calculate WPM over this rolling window
-DEFAULT_COOLDOWN_SECONDS = 30  # Don't spam notifications
+DEFAULT_COOLDOWN_SECONDS = 10  # Don't spam notifications
 CHARS_PER_WORD = 5  # Standard WPM calculation
-MIN_CHARS_FOR_WPM = (
-    30  # Need at least this many chars to calculate WPM (avoids false positives)
-)
+SUSTAINED_WINDOW_SECONDS = 20  # For tracking sustained typing peaks
+MIN_SUSTAINED_WPM = 10  # Only track sustained periods with at least this WPM
+
+
+def min_chars_for_window(window_seconds: int, wpm_threshold: int) -> int:
+    """
+    Calculate minimum chars needed to reliably detect the threshold WPM.
+    We require ~80% of what you'd type at threshold speed to avoid noise.
+    """
+    chars_per_second_at_threshold = (wpm_threshold * CHARS_PER_WORD) / 60
+    return int(chars_per_second_at_threshold * window_seconds * 0.8)
 
 
 class TypingSpeedMonitor:
-    def __init__(self, wpm_threshold: int, window_seconds: int, cooldown_seconds: int):
+    def __init__(
+        self,
+        wpm_threshold: int,
+        window_seconds: int,
+        cooldown_seconds: int,
+        debug: bool = False,
+    ):
         self.wpm_threshold = wpm_threshold
         self.window_seconds = window_seconds
         self.cooldown_seconds = cooldown_seconds
+        self.debug = debug
+
+        # Derive min chars from window and threshold
+        self.min_chars = min_chars_for_window(window_seconds, wpm_threshold)
+        self.sustained_min_chars = min_chars_for_window(
+            SUSTAINED_WINDOW_SECONDS, wpm_threshold
+        )
 
         self.keypress_times: deque[float] = deque()
         self.lock = Lock()
         self.last_notification_time = 0
         self.running = True
+
+        # For tracking sustained typing (longer window)
+        self.sustained_keypress_times: deque[float] = deque()
+        self.sustained_peak_wpm = 0.0
+        self.last_debug_print = 0
 
     def notify(self, title: str, message: str):
         """Send a macOS desktop notification."""
@@ -52,8 +78,6 @@ class TypingSpeedMonitor:
                 title,
                 "-message",
                 message,
-                "-sound",
-                "Funk",
             ],
             capture_output=True,
         )
@@ -70,7 +94,7 @@ class TypingSpeedMonitor:
 
             char_count = len(self.keypress_times)
 
-            if char_count < MIN_CHARS_FOR_WPM:
+            if char_count < self.min_chars:
                 return 0.0
 
             # Time from first to last keypress in window
@@ -84,6 +108,35 @@ class TypingSpeedMonitor:
         words = char_count / CHARS_PER_WORD
         return words / minutes
 
+    def calculate_sustained_wpm(self) -> tuple[float, float]:
+        """Calculate WPM over a longer sustained window. Returns (wpm, time_span)."""
+        now = time.time()
+        cutoff = now - SUSTAINED_WINDOW_SECONDS
+
+        with self.lock:
+            # Remove old keypresses outside the sustained window
+            while (
+                self.sustained_keypress_times
+                and self.sustained_keypress_times[0] < cutoff
+            ):
+                self.sustained_keypress_times.popleft()
+
+            char_count = len(self.sustained_keypress_times)
+
+            if char_count < self.sustained_min_chars:
+                return 0.0, 0.0
+
+            time_span = (
+                self.sustained_keypress_times[-1] - self.sustained_keypress_times[0]
+            )
+
+        if time_span <= 0:
+            return 0.0, 0.0
+
+        minutes = time_span / 60
+        words = char_count / CHARS_PER_WORD
+        return words / minutes, time_span
+
     def on_press(self, key):
         """Handle keypress events."""
         # Only count actual character keys, not modifiers or backspace
@@ -96,8 +149,31 @@ class TypingSpeedMonitor:
 
             with self.lock:
                 self.keypress_times.append(now)
+                self.sustained_keypress_times.append(now)
 
             wpm = self.calculate_wpm()
+            sustained_wpm, sustained_span = self.calculate_sustained_wpm()
+
+            # Track peak sustained WPM
+            if (
+                sustained_span >= SUSTAINED_WINDOW_SECONDS * 0.8
+                and sustained_wpm >= MIN_SUSTAINED_WPM
+            ):
+                if sustained_wpm > self.sustained_peak_wpm:
+                    self.sustained_peak_wpm = sustained_wpm
+                    if self.debug:
+                        print(
+                            f"📈 New sustained peak: {sustained_wpm:.0f} WPM over {sustained_span:.1f}s"
+                        )
+
+            # Debug: print stats every 5 seconds
+            if self.debug and now - self.last_debug_print >= 5:
+                self.last_debug_print = now
+                print(
+                    f"   [{self.window_seconds}s window: {wpm:.0f} WPM] "
+                    f"[{SUSTAINED_WINDOW_SECONDS}s window: {sustained_wpm:.0f} WPM over {sustained_span:.1f}s] "
+                    f"[peak: {self.sustained_peak_wpm:.0f} WPM]"
+                )
 
             # Check if we should alert
             if wpm > self.wpm_threshold:
@@ -114,7 +190,11 @@ class TypingSpeedMonitor:
         print(f"   Threshold: {self.wpm_threshold} WPM")
         print(f"   Window: {self.window_seconds}s rolling average")
         print(f"   Cooldown: {self.cooldown_seconds}s between alerts")
-        print(f"   Min chars: {MIN_CHARS_FOR_WPM} (before calculating WPM)")
+        print(f"   Min chars: {self.min_chars} (derived from window & threshold)")
+        if self.debug:
+            print(
+                f"   Debug: ON (stats every 5s, tracking {SUSTAINED_WINDOW_SECONDS}s sustained window)"
+            )
         print()
         print("Monitoring... (Ctrl+C to stop)")
         print()
@@ -124,6 +204,10 @@ class TypingSpeedMonitor:
                 listener.join()
             except KeyboardInterrupt:
                 print("\n👋 Stopped monitoring")
+                if self.sustained_peak_wpm > 0:
+                    print(
+                        f"📊 Peak sustained WPM ({SUSTAINED_WINDOW_SECONDS}s+ window): {self.sustained_peak_wpm:.0f}"
+                    )
 
 
 def main():
@@ -152,6 +236,12 @@ def main():
         default=DEFAULT_COOLDOWN_SECONDS,
         help="Seconds between notifications",
     )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="Print WPM stats every 5 seconds (for calibration)",
+    )
 
     args = parser.parse_args()
 
@@ -159,6 +249,7 @@ def main():
         wpm_threshold=args.threshold,
         window_seconds=args.window,
         cooldown_seconds=args.cooldown,
+        debug=args.debug,
     )
     monitor.run()
 
