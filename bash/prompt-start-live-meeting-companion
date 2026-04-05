@@ -1,0 +1,4 @@
+#!/bin/sh
+cat <<'EOF'
+I'm about to join a meeting called "260327-1-meeting". Use the /live-transcribe skill and follow the "Live meeting companion mode" procedure: start transcription, then poll the transcript every ~60 seconds and give me running summaries. I'll ask you questions about the meeting in between updates.
+EOF

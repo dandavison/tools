@@ -1,0 +1,9 @@
+#!/bin/sh
+
+gh run list \
+    --branch "$(git branch --show-current)" \
+    --status failure \
+    --limit 1 \
+    --json databaseId \
+    -q '.[0].databaseId' |
+    xargs gh run rerun --failed

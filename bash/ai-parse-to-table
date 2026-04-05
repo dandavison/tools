@@ -1,6 +1,6 @@
 #!/bin/bash
-
-ai <<'↵'
-Parse this input. Output it as one or more tables with correct alignment such that it displays
-nicely in a terminal.
+ai "$(cat <<'↵'
+Parse this input.
+Output it as one or more tables with correct alignment such that it displays nicely in a terminal.
 ↵
+)"

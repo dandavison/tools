@@ -1,0 +1,5 @@
+#!/bin/bash
+ai "$(cat <<'↵'
+Format this readably as a triple-backtick delimited plain text block.
+↵
+)"

@@ -10,4 +10,4 @@ rel_path="$1"
 if [ ! -x "$rel_path" ]; then
     chmod +x "$rel_path"
 fi
-ln -fs $(readlink -f "$rel_path") ~/bin/"$2"
+ln -fs "$(readlink -f "$rel_path")" ~/bin/"$2"
