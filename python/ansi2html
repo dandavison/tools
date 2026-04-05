@@ -1,0 +1,237 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""
+Convert ANSI terminal output to HTML, with OSC8 hyperlink support.
+
+Handles:
+- SGR color/style sequences (16 colors, 256 colors, 24-bit truecolor)
+- OSC8 hyperlinks: ESC]8;;URL ST ... ESC]8;;ST -> <a href="URL">...</a>
+- Bold, italic, underline, strikethrough
+"""
+
+import html
+import re
+import sys
+
+# SGR 30-37 / 90-97 standard colors
+COLORS_16 = {
+    0: "#000000",
+    1: "#aa0000",
+    2: "#00aa00",
+    3: "#aa5500",
+    4: "#0000aa",
+    5: "#aa00aa",
+    6: "#00aaaa",
+    7: "#aaaaaa",
+    8: "#555555",
+    9: "#ff5555",
+    10: "#55ff55",
+    11: "#ffff55",
+    12: "#5555ff",
+    13: "#ff55ff",
+    14: "#55ffff",
+    15: "#ffffff",
+}
+
+
+# 256-color palette: 0-15 same as above, 16-231 color cube, 232-255 grayscale
+def color_256(n: int) -> str:
+    if n < 16:
+        return COLORS_16[n]
+    if n < 232:
+        n -= 16
+        r = (n // 36) * 51
+        g = ((n % 36) // 6) * 51
+        b = (n % 6) * 51
+        return f"#{r:02x}{g:02x}{b:02x}"
+    g = 8 + (n - 232) * 10
+    return f"#{g:02x}{g:02x}{g:02x}"
+
+
+# Regex for ESC sequences:
+#   OSC8: \x1b\]8;[params];[url]\x1b\\  (or \x07 as ST)
+#   SGR:  \x1b\[[0-9;]*m
+#   Other CSI: \x1b\[[0-9;]*[A-Za-z] (cursor movement, erase, etc — stripped)
+TOKEN_RE = re.compile(
+    r"(\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\))"  # OSC8
+    r"|(\x1b\[[0-9;]*m)"  # SGR
+    r"|(\x1b\[[0-9;]*[A-Za-ln-z])"  # Other CSI (strip)
+)
+
+
+def parse_sgr(params: list[int], state: dict[str, object]) -> None:
+    i = 0
+    while i < len(params):
+        p = params[i]
+        if p == 0:
+            state.clear()
+        elif p == 1:
+            state["bold"] = True
+        elif p == 3:
+            state["italic"] = True
+        elif p == 4:
+            state["underline"] = True
+        elif p == 9:
+            state["strikethrough"] = True
+        elif p == 22:
+            state.pop("bold", None)
+        elif p == 23:
+            state.pop("italic", None)
+        elif p == 24:
+            state.pop("underline", None)
+        elif p == 29:
+            state.pop("strikethrough", None)
+        elif 30 <= p <= 37:
+            state["fg"] = COLORS_16[p - 30]
+        elif p == 38:
+            if i + 1 < len(params) and params[i + 1] == 5 and i + 2 < len(params):
+                state["fg"] = color_256(params[i + 2])
+                i += 2
+            elif i + 1 < len(params) and params[i + 1] == 2 and i + 4 < len(params):
+                r, g, b = params[i + 2], params[i + 3], params[i + 4]
+                state["fg"] = f"#{r:02x}{g:02x}{b:02x}"
+                i += 4
+        elif p == 39:
+            state.pop("fg", None)
+        elif 40 <= p <= 47:
+            state["bg"] = COLORS_16[p - 40]
+        elif p == 48:
+            if i + 1 < len(params) and params[i + 1] == 5 and i + 2 < len(params):
+                state["bg"] = color_256(params[i + 2])
+                i += 2
+            elif i + 1 < len(params) and params[i + 1] == 2 and i + 4 < len(params):
+                r, g, b = params[i + 2], params[i + 3], params[i + 4]
+                state["bg"] = f"#{r:02x}{g:02x}{b:02x}"
+                i += 4
+        elif p == 49:
+            state.pop("bg", None)
+        elif 90 <= p <= 97:
+            state["fg"] = COLORS_16[p - 90 + 8]
+        elif 100 <= p <= 107:
+            state["bg"] = COLORS_16[p - 100 + 8]
+        i += 1
+
+
+def state_to_style(state: dict[str, object]) -> str:
+    parts: list[str] = []
+    if "fg" in state:
+        parts.append(f"color:{state['fg']}")
+    if "bg" in state:
+        parts.append(f"background-color:{state['bg']}")
+    if state.get("bold"):
+        parts.append("font-weight:bold")
+    if state.get("italic"):
+        parts.append("font-style:italic")
+    decorations: list[str] = []
+    if state.get("underline"):
+        decorations.append("underline")
+    if state.get("strikethrough"):
+        decorations.append("line-through")
+    if decorations:
+        parts.append(f"text-decoration:{' '.join(decorations)}")
+    return ";".join(parts)
+
+
+OSC8_RE = re.compile(r"\x1b\]8;([^\x07\x1b]*);([^\x07\x1b]*)(?:\x07|\x1b\\)")
+
+
+def convert(text: str) -> str:
+    out: list[str] = []
+    sgr_state: dict[str, object] = {}
+    span_open = False
+    link_url: str | None = None
+
+    pos = 0
+    for m in TOKEN_RE.finditer(text):
+        # Emit text before this match
+        before = text[pos : m.start()]
+        if before:
+            out.append(html.escape(before))
+        pos = m.end()
+
+        if m.group(3):  # Other CSI — strip silently
+            pass
+        elif m.group(1):  # OSC8
+            osc_m = OSC8_RE.match(m.group(1))
+            if osc_m:
+                url = osc_m.group(2)
+                if url:
+                    # Opening hyperlink
+                    if link_url is not None:
+                        out.append("</a>")
+                    link_url = url
+                    out.append(f'<a href="{html.escape(url)}">')
+                else:
+                    # Closing hyperlink
+                    if link_url is not None:
+                        out.append("</a>")
+                        link_url = None
+        elif m.group(2):  # SGR
+            seq = m.group(2)
+            params_str = seq[2:-1]  # strip ESC[ and m
+            params = [int(x) if x else 0 for x in params_str.split(";")]
+            if span_open:
+                out.append("</span>")
+                span_open = False
+            parse_sgr(params, sgr_state)
+            style = state_to_style(sgr_state)
+            if style:
+                out.append(f'<span style="{style}">')
+                span_open = True
+
+    # Remaining text
+    tail = text[pos:]
+    if tail:
+        out.append(html.escape(tail))
+    if span_open:
+        out.append("</span>")
+    if link_url is not None:
+        out.append("</a>")
+
+    return "".join(out)
+
+
+def main() -> None:
+    dark_bg = "--dark" in sys.argv
+    bg = "#0d1117" if dark_bg else "#ffffff"
+    fg = "#c9d1d9" if dark_bg else "#24292f"
+
+    raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    body = convert(raw)
+
+    print(f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{
+  background: {bg};
+  color: {fg};
+  margin: 0;
+  padding: 16px;
+}}
+pre {{
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: normal;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}}
+a {{
+  color: inherit;
+  text-decoration: none;
+}}
+</style>
+</head>
+<body>
+<pre>{body}</pre>
+</body>
+</html>""")
+
+
+if __name__ == "__main__":
+    main()
