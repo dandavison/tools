@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""Render a current-month Claude Code cumulative usage graph as HTML."""
+
+from __future__ import annotations
+
+import argparse
+import calendar
+import json
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from html import escape
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_METRIC = "totalCost"
+VALID_METRICS = (
+    "totalCost",
+    "totalTokens",
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheCreationTokens",
+)
+
+
+@dataclass(frozen=True)
+class ProjectBreakdown:
+    project: str
+    value: Decimal
+
+
+@dataclass(frozen=True)
+class DailyPoint:
+    day: date
+    value: Decimal
+    cumulative: Decimal
+    projects: list[ProjectBreakdown]
+
+
+def parse_args() -> argparse.Namespace:
+    today = date.today()
+    parser = argparse.ArgumentParser(
+        description="Generate an HTML cumulative usage chart for Claude Code via ccusage."
+    )
+    parser.add_argument(
+        "--month",
+        default=today.strftime("%Y-%m"),
+        help="Month to graph in YYYY-MM format. Defaults to the current month.",
+    )
+    parser.add_argument(
+        "--metric",
+        default=DEFAULT_METRIC,
+        choices=VALID_METRICS,
+        help="Metric to graph from ccusage output.",
+    )
+    parser.add_argument("--locale", help="Locale to pass through to ccusage.")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "calculate", "display"),
+        default="auto",
+        help="Cost mode to pass through to ccusage.",
+    )
+    parser.add_argument("--project", help="Project filter to pass through to ccusage.")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use cached pricing data instead of fetching live pricing.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output HTML path. Defaults to a temp HTML file.",
+    )
+    return parser.parse_args()
+
+
+def parse_month(month_text: str) -> tuple[date, date]:
+    try:
+        start = datetime.strptime(f"{month_text}-01", "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --month value {month_text!r}; expected YYYY-MM.") from exc
+    end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+    return start, end
+
+
+def build_ccusage_commands(
+    *,
+    since: date,
+    until: date,
+    locale: str | None,
+    mode: str,
+    project: str | None,
+    offline: bool,
+ ) -> list[list[str]]:
+    suffix = [
+        "daily",
+        "--json",
+        "--instances",
+        "--since",
+        since.strftime("%Y%m%d"),
+        "--until",
+        until.strftime("%Y%m%d"),
+        "--mode",
+        mode,
+        "--order",
+        "asc",
+    ]
+    if locale:
+        suffix.extend(["--locale", locale])
+    if project:
+        suffix.extend(["--project", project])
+    if offline:
+        suffix.append("--offline")
+    return [["npx", "-y", "ccusage", *suffix]]
+
+
+def run_ccusage(candidates: list[list[str]]) -> dict[str, Any]:
+    errors: list[str] = []
+    for command in candidates:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except FileNotFoundError:
+            errors.append(f"{command[0]} not found")
+            continue
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() or exc.stdout.strip() or "unknown error"
+            errors.append(f"{' '.join(command)}: {stderr}")
+            continue
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"ccusage returned invalid JSON for command {' '.join(command)}"
+            ) from exc
+    raise SystemExit("Unable to run ccusage.\n" + "\n".join(errors))
+
+
+def decimal_value(raw: Any) -> Decimal:
+    if raw is None:
+        return Decimal("0")
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError) as exc:
+        raise SystemExit(f"Unable to parse numeric value from {raw!r}") from exc
+
+
+def normalize_project_name(name: str) -> str:
+    if name.startswith("-"):
+        return "/" + name[1:]
+    return name
+
+
+def build_daily_points(
+    payload: dict[str, Any], metric: str, month_start: date, month_end: date, today: date
+) -> list[DailyPoint]:
+    projects = payload.get("projects")
+    if not isinstance(projects, dict):
+        raise SystemExit("ccusage JSON did not contain a top-level 'projects' object.")
+
+    daily_projects: dict[date, list[ProjectBreakdown]] = {}
+
+    for project_name, rows in projects.items():
+        if not isinstance(project_name, str) or not isinstance(rows, list):
+            continue
+        normalized_name = normalize_project_name(project_name)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_date = row.get("date")
+            if not isinstance(raw_date, str):
+                continue
+            day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            if day < month_start or day > min(month_end, today):
+                continue
+            daily_projects.setdefault(day, []).append(
+                ProjectBreakdown(
+                    project=normalized_name,
+                    value=decimal_value(row.get(metric)),
+                )
+            )
+
+    points: list[DailyPoint] = []
+    cumulative = Decimal("0")
+    day = month_start
+    while day <= month_end:
+        projects_for_day = sorted(
+            daily_projects.get(day, []),
+            key=lambda item: (-item.value, item.project),
+        )
+        day_value = sum((item.value for item in projects_for_day), start=Decimal("0"))
+        if day <= today:
+            cumulative += day_value
+            points.append(
+                DailyPoint(
+                    day=day,
+                    value=day_value,
+                    cumulative=cumulative,
+                    projects=projects_for_day,
+                )
+            )
+        else:
+            points.append(
+                DailyPoint(
+                    day=day,
+                    value=Decimal("0"),
+                    cumulative=Decimal("0"),
+                    projects=[],
+                )
+            )
+        day += timedelta(days=1)
+    return points
+
+
+def format_metric_value(metric: str, value: Decimal) -> str:
+    if metric == "totalCost":
+        return f"${value:,.2f}"
+    return f"{int(value):,}"
+
+
+def metric_axis_label(metric: str) -> str:
+    if metric == "totalCost":
+        return "Cumulative cost"
+    return f"Cumulative {metric}"
+
+
+def decimal_to_float(value: Decimal) -> float:
+    return float(value.quantize(Decimal("0.0001")) if value != 0 else Decimal("0"))
+
+
+def build_chart_model(
+    points: list[DailyPoint], metric: str, month: str, today: date
+) -> dict[str, Any]:
+    last_actual = next((point for point in reversed(points) if point.day <= today), None)
+    if last_actual is None:
+        raise SystemExit("No points available for the requested range.")
+
+    days_in_month = len(points)
+    today_day = max(last_actual.day.day, 1)
+    prediction: list[float] = []
+    slope = decimal_to_float(last_actual.cumulative) / today_day
+    prediction = [round(slope * (index + 1), 4) for index in range(days_in_month)]
+    target_end_value = Decimal("1000")
+    target_slope = decimal_to_float(target_end_value) / days_in_month
+    target = [round(target_slope * (index + 1), 4) for index in range(days_in_month)]
+
+    max_actual = max((point.cumulative for point in points if point.day <= today), default=Decimal("0"))
+    max_prediction = max((Decimal(str(value)) for value in prediction), default=Decimal("0"))
+    y_max = max(max_actual, max_prediction, target_end_value, Decimal("1"))
+
+    daily_data = []
+    for point in points:
+        is_future = point.day > today
+        daily_data.append(
+            {
+                "date": point.day.isoformat(),
+                "label": point.day.strftime("%b %-d") if sys.platform != "win32" else point.day.strftime("%b %d").replace(" 0", " "),
+                "day": point.day.day,
+                "dailyValue": decimal_to_float(point.value),
+                "dailyValueLabel": format_metric_value(metric, point.value),
+                "cumulative": None if is_future else decimal_to_float(point.cumulative),
+                "cumulativeLabel": None if is_future else format_metric_value(metric, point.cumulative),
+                "projects": [
+                    {
+                        "name": item.project,
+                        "value": decimal_to_float(item.value),
+                        "label": format_metric_value(metric, item.value),
+                    }
+                    for item in point.projects
+                ],
+            }
+        )
+
+    return {
+        "month": month,
+        "metric": metric,
+        "metricLabel": metric_axis_label(metric),
+        "daysInMonth": days_in_month,
+        "todayDay": last_actual.day.day,
+        "totalLabel": format_metric_value(metric, last_actual.cumulative),
+        "predictionEndLabel": format_metric_value(metric, Decimal(str(prediction[-1]))),
+        "targetEndLabel": format_metric_value(metric, target_end_value),
+        "yMax": decimal_to_float(y_max),
+        "daily": daily_data,
+        "prediction": prediction,
+        "target": target,
+    }
+
+
+def render_html(model: dict[str, Any]) -> str:
+    payload = json.dumps(model, separators=(",", ":"))
+    title = escape(f"Claude Code usage for {model['month']}")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg: #f5f1e8;
+      --panel: #fffaf0;
+      --ink: #1c1917;
+      --muted: #6b645c;
+      --grid: #d7cfbf;
+      --actual: #0f766e;
+      --target: #7c3aed;
+      --point: #115e59;
+      --accent: #b91c1c;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15,118,110,0.10), transparent 28%),
+        radial-gradient(circle at top right, rgba(180,83,9,0.10), transparent 24%),
+        linear-gradient(180deg, #f7f2e9 0%, #efe8dc 100%);
+    }}
+    .wrap {{
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 20px 40px;
+    }}
+    .stats {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }}
+    .stat {{
+      background: rgba(255,250,240,0.85);
+      border: 1px solid rgba(28,25,23,0.08);
+      border-radius: 14px;
+      padding: 12px 14px;
+      min-width: 180px;
+      backdrop-filter: blur(8px);
+    }}
+    .stat .label {{
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    .stat .value {{
+      font-size: 1.45rem;
+      margin-top: 4px;
+      font-weight: 700;
+    }}
+    .chart-shell {{
+      position: relative;
+      background: rgba(255,250,240,0.92);
+      border: 1px solid rgba(28,25,23,0.08);
+      border-radius: 24px;
+      padding: 18px 16px 24px;
+      box-shadow: 0 20px 50px rgba(28,25,23,0.08);
+      overflow: hidden;
+    }}
+    svg {{
+      width: 100%;
+      height: auto;
+      display: block;
+    }}
+    .axis-label, .tick-text {{
+      fill: var(--muted);
+      font-size: 12px;
+    }}
+    .grid {{
+      stroke: var(--grid);
+      stroke-width: 1;
+    }}
+    .actual-line {{
+      fill: none;
+      stroke: var(--actual);
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }}
+    .target-line {{
+      fill: none;
+      stroke: var(--target);
+      stroke-width: 3;
+      stroke-dasharray: 4 8;
+      stroke-linecap: round;
+    }}
+    .point {{
+      fill: var(--panel);
+      stroke: var(--point);
+      stroke-width: 3;
+      cursor: pointer;
+    }}
+    .hit {{
+      fill: transparent;
+      cursor: pointer;
+    }}
+    .target-label {{
+      fill: var(--target);
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .tooltip {{
+      position: fixed;
+      z-index: 10;
+      width: min(360px, calc(100vw - 20px));
+      pointer-events: none;
+      background: rgba(28,25,23,0.94);
+      color: #fffaf0;
+      border-radius: 16px;
+      padding: 14px 16px;
+      box-shadow: 0 18px 40px rgba(28,25,23,0.28);
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }}
+    .tooltip.visible {{
+      opacity: 1;
+      transform: translateY(0);
+    }}
+    .tooltip h2 {{
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }}
+    .tooltip .meta {{
+      color: #d6d0c4;
+      font-size: 0.88rem;
+      margin-bottom: 10px;
+    }}
+    .tooltip ul {{
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 6px;
+      max-height: 240px;
+      overflow: auto;
+    }}
+    .tooltip li {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.9rem;
+    }}
+    .tooltip code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+      color: #efe8dc;
+      overflow-wrap: anywhere;
+    }}
+    @media (max-width: 720px) {{
+      .wrap {{ padding-inline: 12px; }}
+      .chart-shell {{ padding-inline: 8px; }}
+      .tick-text {{ font-size: 10px; }}
+    }}
+  </style>
+</head>
+  <body>
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Current</div>
+        <div class="value">{escape(model["totalLabel"])}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Projected month end</div>
+        <div class="value">{escape(model["predictionEndLabel"])}</div>
+      </div>
+    </div>
+    <div class="chart-shell">
+      <svg id="chart" viewBox="0 0 1200 620" role="img" aria-label="{title}"></svg>
+    </div>
+  </div>
+  <div id="tooltip" class="tooltip" aria-hidden="true"></div>
+  <script>
+    const model = {payload};
+    const svg = document.getElementById("chart");
+    const tooltip = document.getElementById("tooltip");
+    const width = 1200;
+    const height = 620;
+    const margin = {{ top: 36, right: 28, bottom: 72, left: 86 }};
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    const maxY = model.yMax;
+    const stepX = model.daysInMonth === 1 ? 0 : plotWidth / (model.daysInMonth - 1);
+    const ns = "http://www.w3.org/2000/svg";
+
+    function el(name, attrs = {{}}, text = null) {{
+      const node = document.createElementNS(ns, name);
+      for (const [key, value] of Object.entries(attrs)) {{
+        node.setAttribute(key, String(value));
+      }}
+      if (text !== null) node.textContent = text;
+      return node;
+    }}
+
+    function xFor(index) {{
+      return margin.left + index * stepX;
+    }}
+
+    function yFor(value) {{
+      return margin.top + plotHeight - (value / maxY) * plotHeight;
+    }}
+
+    function pathFromPoints(points) {{
+      return points.map((point, index) => `${{index === 0 ? "M" : "L"}}${{point[0].toFixed(2)}},${{point[1].toFixed(2)}}`).join(" ");
+    }}
+
+    function showTooltip(event, entry) {{
+      const projectItems = entry.projects.length
+        ? `<ul>${{entry.projects.map(project => `<li><code>${{escapeHtml(project.name)}}</code><span>${{project.label}}</span></li>`).join("")}}</ul>`
+        : "<div>No project usage on this day.</div>";
+      tooltip.innerHTML = `
+        <h2>${{entry.label}}</h2>
+        <div class="meta">Daily: ${{entry.dailyValueLabel}}<br>Cumulative: ${{entry.cumulativeLabel ?? "Future day"}}</div>
+        ${{projectItems}}
+      `;
+      tooltip.classList.add("visible");
+      tooltip.setAttribute("aria-hidden", "false");
+      const offset = 14;
+      const x = Math.min(window.innerWidth - tooltip.offsetWidth - 10, event.clientX + offset);
+      const y = Math.min(window.innerHeight - tooltip.offsetHeight - 10, event.clientY + offset);
+      tooltip.style.left = `${{Math.max(10, x)}}px`;
+      tooltip.style.top = `${{Math.max(10, y)}}px`;
+    }}
+
+    function hideTooltip() {{
+      tooltip.classList.remove("visible");
+      tooltip.setAttribute("aria-hidden", "true");
+    }}
+
+    function escapeHtml(text) {{
+      return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }}
+
+    const yTicks = 5;
+    for (let i = 0; i <= yTicks; i += 1) {{
+      const value = (maxY / yTicks) * i;
+      const y = yFor(value);
+      svg.appendChild(el("line", {{
+        x1: margin.left,
+        y1: y,
+        x2: width - margin.right,
+        y2: y,
+        class: "grid"
+      }}));
+      svg.appendChild(el("text", {{
+        x: margin.left - 12,
+        y: y + 4,
+        "text-anchor": "end",
+        class: "tick-text"
+      }}, new Intl.NumberFormat("en-US", {{
+        style: model.metric === "totalCost" ? "currency" : "decimal",
+        currency: "USD",
+        maximumFractionDigits: model.metric === "totalCost" ? 0 : 0,
+      }}).format(value)));
+    }}
+
+    const actualCoordinates = [];
+    const targetCoordinates = [];
+
+    model.daily.forEach((entry, index) => {{
+      const x = xFor(index);
+      const targetY = yFor(model.target[index]);
+      targetCoordinates.push([x, targetY]);
+
+      if (entry.cumulative !== null) {{
+        actualCoordinates.push([x, yFor(entry.cumulative)]);
+      }}
+
+      const dayTick = el("text", {{
+        x,
+        y: height - margin.bottom + 24,
+        "text-anchor": "middle",
+        class: "tick-text"
+      }}, String(entry.day));
+      svg.appendChild(dayTick);
+
+    }});
+
+    svg.appendChild(el("path", {{
+      d: pathFromPoints(targetCoordinates),
+      class: "target-line"
+    }}));
+    const targetEnd = targetCoordinates[targetCoordinates.length - 1];
+    svg.appendChild(el("text", {{
+      x: targetEnd[0] - 4,
+      y: targetEnd[1] - 10,
+      "text-anchor": "end",
+      class: "target-label"
+    }}, "$1000"));
+
+    svg.appendChild(el("path", {{
+      d: pathFromPoints(actualCoordinates),
+      class: "actual-line"
+    }}));
+
+    model.daily.forEach((entry, index) => {{
+      if (entry.cumulative === null) return;
+      const x = xFor(index);
+      const y = yFor(entry.cumulative);
+
+      const hit = el("circle", {{
+        cx: x,
+        cy: y,
+        r: 16,
+        class: "hit"
+      }});
+      hit.addEventListener("mouseenter", event => showTooltip(event, entry));
+      hit.addEventListener("mousemove", event => showTooltip(event, entry));
+      hit.addEventListener("mouseleave", hideTooltip);
+      svg.appendChild(hit);
+
+      svg.appendChild(el("circle", {{
+        cx: x,
+        cy: y,
+        r: 6,
+        class: "point"
+      }}));
+    }});
+
+    svg.appendChild(el("text", {{
+      x: width / 2,
+      y: height - 18,
+      "text-anchor": "middle",
+      class: "axis-label"
+    }}, `Day of month (${{model.month}})`));
+
+    const yAxisLabel = el("text", {{
+      x: 22,
+      y: height / 2,
+      transform: `rotate(-90 22 ${{height / 2}})`,
+      "text-anchor": "middle",
+      class: "axis-label"
+    }}, model.metricLabel);
+    svg.appendChild(yAxisLabel);
+  </script>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    args = parse_args()
+    month_start, month_end = parse_month(args.month)
+    today = date.today()
+    if month_start > today:
+        raise SystemExit("Requested month is in the future.")
+    until = min(month_end, today)
+    if args.output:
+        output_path = args.output
+    else:
+        temp = tempfile.NamedTemporaryFile(
+            mode="w",
+            prefix=f"claude-usage-{args.month}-",
+            suffix=".html",
+            delete=False,
+        )
+        temp.close()
+        output_path = Path(temp.name)
+
+    payload = run_ccusage(
+        build_ccusage_commands(
+            since=month_start,
+            until=until,
+            locale=args.locale,
+            mode=args.mode,
+            project=args.project,
+            offline=args.offline,
+        )
+    )
+    points = build_daily_points(payload, args.metric, month_start, month_end, today)
+    model = build_chart_model(points, args.metric, args.month, today)
+    output_path.write_text(render_html(model), encoding="utf-8")
+    subprocess.run(["open", str(output_path)], check=True)
+    print(output_path.resolve())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
