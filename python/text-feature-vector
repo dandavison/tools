@@ -1,0 +1,223 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["language-tool-python"]
+# ///
+"""Emit a text feature vector for one document.
+
+The output is descriptive, not a classifier. It keeps raw counts and denominators
+so downstream consumers can reason about sample size instead of only rates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import importlib
+import re
+import statistics
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+
+WORD_RE = re.compile(r"\b[0-9A-Za-z]+(?:[-'][0-9A-Za-z]+)*\b")
+SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)", re.MULTILINE)
+PARAGRAPH_RE = re.compile(r"\n\s*\n+", re.MULTILINE)
+PUNCTUATION_RE = re.compile(r"[,:;!?()\[\]\"']")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Analyze one document and emit a JSON feature vector."
+    )
+    parser.add_argument("path", type=Path, help="Path to a UTF-8 text document.")
+    parser.add_argument(
+        "--language",
+        default="en-US",
+        help="LanguageTool language code. Defaults to en-US.",
+    )
+    parser.add_argument(
+        "--indent",
+        type=int,
+        default=2,
+        help="JSON indentation level. Defaults to 2.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    text = args.path.read_text(encoding="utf-8")
+    words = WORD_RE.findall(text)
+    sentences = extract_sentences(text)
+    paragraphs = extract_paragraphs(text)
+    language_tool_python = importlib.import_module("language_tool_python")
+
+    with language_tool_python.LanguageTool(args.language) as tool:
+        matches = tool.check(text)
+
+    payload = {
+        "document": str(args.path),
+        "language": args.language,
+        "sample_size": build_sample_size(text, words, sentences, paragraphs),
+        "features": build_features(text, words, sentences, matches),
+        "language_tool": summarize_matches(matches, len(words), len(sentences)),
+    }
+    json.dump(payload, sys.stdout, indent=args.indent, sort_keys=True)
+    sys.stdout.write("\n")
+
+
+def extract_sentences(text: str) -> list[str]:
+    return [
+        sentence.strip() for sentence in SENTENCE_RE.findall(text) if sentence.strip()
+    ]
+
+
+def extract_paragraphs(text: str) -> list[str]:
+    return [
+        paragraph for paragraph in PARAGRAPH_RE.split(text.strip()) if paragraph.strip()
+    ]
+
+
+def build_sample_size(
+    text: str, words: list[str], sentences: list[str], paragraphs: list[str]
+) -> dict[str, int]:
+    return {
+        "characters": len(text),
+        "characters_non_whitespace": sum(not char.isspace() for char in text),
+        "words": len(words),
+        "sentences": len(sentences),
+        "paragraphs": len(paragraphs),
+    }
+
+
+def build_features(
+    text: str,
+    words: list[str],
+    sentences: list[str],
+    matches: list[Any],
+) -> dict[str, Any]:
+    sentence_word_counts = [len(WORD_RE.findall(sentence)) for sentence in sentences]
+    punctuation_count = len(PUNCTUATION_RE.findall(text))
+    long_words = sum(len(word) >= 7 for word in words)
+    unique_words = len({word.lower() for word in words})
+
+    return {
+        "word_length": {
+            "mean_characters": safe_mean([len(word) for word in words]),
+            "long_word_share": ratio(long_words, len(words)),
+        },
+        "sentence_length": {
+            "mean_words": safe_mean(sentence_word_counts),
+            "stdev_words": safe_stdev(sentence_word_counts),
+            "max_words": max(sentence_word_counts, default=0),
+        },
+        "lexical_diversity": {
+            "type_token_ratio": ratio(unique_words, len(words)),
+            "unique_words": unique_words,
+            "total_words": len(words),
+        },
+        "punctuation_density": rate_feature(
+            numerator=punctuation_count,
+            denominator=len(words),
+            unit="words",
+        ),
+        "language_tool_total": rate_feature(
+            numerator=len(matches),
+            denominator=len(words),
+            unit="words",
+        ),
+    }
+
+
+def summarize_matches(
+    matches: list[Any], word_count: int, sentence_count: int
+) -> dict[str, Any]:
+    by_issue_type: Counter[str] = Counter()
+    by_category: Counter[str] = Counter()
+
+    for match in matches:
+        issue_type = getattr(match, "rule_issue_type", None) or "unknown"
+        category = getattr(match, "category", None) or "unknown"
+        by_issue_type[str(issue_type)] += 1
+        by_category[str(category or "unknown")] += 1
+
+    return {
+        "total_matches": len(matches),
+        "by_issue_type": {
+            key: {
+                "count": count,
+                "per_1000_words": per_1000(count, word_count),
+                "per_sentence": per_unit(count, sentence_count),
+            }
+            for key, count in sorted(by_issue_type.items())
+        },
+        "by_category": {
+            key: {
+                "count": count,
+                "per_1000_words": per_1000(count, word_count),
+                "per_sentence": per_unit(count, sentence_count),
+            }
+            for key, count in sorted(by_category.items())
+        },
+        "matches": [match_record(match) for match in matches],
+    }
+
+
+def match_record(match: Any) -> dict[str, Any]:
+    replacements = getattr(match, "replacements", None) or []
+    return {
+        "offset": int(getattr(match, "offset", 0)),
+        "length": int(getattr(match, "error_length", 0)),
+        "message": str(getattr(match, "message", "")),
+        "rule_id": str(getattr(match, "rule_id", "unknown")),
+        "issue_type": str(getattr(match, "rule_issue_type", "unknown")),
+        "category": str(getattr(match, "category", "unknown")),
+        "sentence": str(getattr(match, "sentence", "")),
+        "replacements": [str(replacement) for replacement in replacements[:5]],
+    }
+
+
+def rate_feature(numerator: int, denominator: int, unit: str) -> dict[str, Any]:
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "denominator_unit": unit,
+        "per_1000": per_1000(numerator, denominator),
+        "rate": per_unit(numerator, denominator),
+    }
+
+
+def ratio(numerator: int, denominator: int) -> float | None:
+    return per_unit(numerator, denominator)
+
+
+def per_1000(numerator: int, denominator: int) -> float | None:
+    if denominator == 0:
+        return None
+    return round(numerator * 1000 / denominator, 6)
+
+
+def per_unit(numerator: int, denominator: int) -> float | None:
+    if denominator == 0:
+        return None
+    return round(numerator / denominator, 6)
+
+
+def safe_mean(values: list[int]) -> float | None:
+    if not values:
+        return None
+    return round(statistics.fmean(values), 6)
+
+
+def safe_stdev(values: list[int]) -> float | None:
+    if len(values) < 2:
+        return None
+    return round(statistics.pstdev(values), 6)
+
+
+if __name__ == "__main__":
+    main()
