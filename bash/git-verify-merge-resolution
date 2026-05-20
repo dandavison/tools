@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+#
+# git-verify-merge-resolution
+#
+# Verify that a cherry-pick / merge / rebase commit faithfully captures the
+# intent of a source commit on top of a different base, accounting for
+# intervening changes on that base.
+#
+# Problem:
+#   When you cherry-pick SOURCE onto BASE and BASE has commits that overlap
+#   with SOURCE's changes, you must resolve conflicts and the resulting
+#   commit will NOT be byte-equivalent to SOURCE. That makes "did I get this
+#   right?" hard to answer with a simple diff.
+#
+# Approach:
+#   `git merge-tree --write-tree BASE SOURCE` performs git's automatic 3-way
+#   merge with no working-tree side effects, producing a tree object that
+#   represents what git would have produced unaided. Diffing that synthetic
+#   tree against HEAD isolates *exactly* what your manual conflict
+#   resolution changed beyond the automerge.
+#
+#   Files split into three buckets:
+#     1. Auto-merged AND identical to HEAD — provably correct, no work needed
+#     2. Auto-merged but differ from HEAD — your manual edits beyond automerge
+#        (review these — typically semantic conflicts the textual merger
+#        missed, e.g. duplicate YAML keys both sides inserted)
+#     3. Hit a real conflict — your resolution needs separate justification
+#        (e.g. "I took BASE's go.mod since it supersedes SOURCE's deps")
+#
+# Usage:
+#   git-verify-merge-resolution <SOURCE> [BASE] [HEAD-REF]
+#
+#   SOURCE    The commit whose intent you're trying to reproduce
+#   BASE      The branch/commit you applied SOURCE on top of (default: origin/main)
+#   HEAD-REF  The commit containing your resolution (default: HEAD)
+
+set -euo pipefail
+
+if [ $# -lt 1 ] || [ $# -gt 3 ]; then
+    echo "usage: $(basename "$0") <SOURCE> [BASE] [HEAD-REF]" >&2
+    echo "  e.g. $(basename "$0") 93a511e origin/main HEAD" >&2
+    exit 2
+fi
+
+SOURCE=$1
+BASE=${2:-origin/main}
+HEAD_REF=${3:-HEAD}
+
+SOURCE_SHA=$(git rev-parse --short "$SOURCE")
+BASE_SHA=$(git rev-parse --short "$BASE")
+HEAD_SHA=$(git rev-parse --short "$HEAD_REF")
+
+echo "═══════════════════════════════════════════════════════════════════════"
+echo "  Verifying merge resolution"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo "  SOURCE (intended patch):  $SOURCE_SHA  ($SOURCE)"
+echo "  BASE   (applied onto):    $BASE_SHA  ($BASE)"
+echo "  HEAD   (your resolution): $HEAD_SHA  ($HEAD_REF)"
+echo
+
+# Run git's automatic 3-way merge into a synthetic tree.
+# stdout's first line is the merged tree SHA; remaining lines are conflict
+# stage entries (only for files git couldn't resolve) followed by a blank
+# line and the "Auto-merging…/CONFLICT…" log on stderr (which we capture).
+MERGE_OUT=$(mktemp)
+MERGE_ERR=$(mktemp)
+trap 'rm -f "$MERGE_OUT" "$MERGE_ERR"' EXIT
+
+if ! git merge-tree --write-tree "$BASE" "$SOURCE" >"$MERGE_OUT" 2>"$MERGE_ERR"; then
+    : # merge-tree exits non-zero when conflicts occurred — we still want the tree
+fi
+
+TREE=$(head -n1 "$MERGE_OUT")
+if ! git rev-parse --quiet --verify "$TREE^{tree}" >/dev/null; then
+    echo "ERROR: git merge-tree did not produce a tree object" >&2
+    cat "$MERGE_OUT" "$MERGE_ERR" >&2
+    exit 1
+fi
+
+# Files git could not auto-merge appear as conflict stage entries in
+# merge-tree's stdout (lines starting with mode bits then stage 1/2/3).
+CONFLICTED_FILES=$(awk 'NR>1 && /^[0-9]/ {print $4}' "$MERGE_OUT" | sort -u)
+
+# The set of files we need to verify is everything SOURCE's patch touched.
+# Don't derive this from `diff TREE HEAD` — that omits files where the
+# automerge result already matches HEAD, which is exactly the happy-path
+# bucket we want to count.
+ALL_TOUCHED=$(git diff --name-only "$SOURCE^" "$SOURCE")
+
+echo "── git merge-tree result ──────────────────────────────────────────────"
+echo "  Synthetic merge tree: $TREE"
+if [ -n "$CONFLICTED_FILES" ]; then
+    echo "  Conflicts in:"
+    echo "$CONFLICTED_FILES" | sed 's/^/    - /'
+else
+    echo "  No conflicts — git auto-merged everything cleanly."
+fi
+echo
+
+# Bucket 1+2: files that auto-merged. Compare against HEAD.
+AUTO_MERGED=$(comm -23 <(echo "$ALL_TOUCHED" | sort -u) <(echo "$CONFLICTED_FILES" | sort -u))
+# Strip blanks from comm output when one side is empty.
+AUTO_MERGED=$(echo "$AUTO_MERGED" | grep -v '^$' || true)
+
+# Files that auto-merged AND differ from HEAD — these contain your manual
+# edits on top of a clean automerge. Most often this means git's textual
+# merger produced something semantically wrong (e.g. duplicate keys) and
+# you fixed it.
+AUTO_MERGED_DIFFERS=""
+if [ -n "$AUTO_MERGED" ]; then
+    AUTO_MERGED_DIFFERS=$(echo "$AUTO_MERGED" | while read -r f; do
+        [ -z "$f" ] && continue
+        if ! git diff --quiet "$TREE" "$HEAD_REF" -- "$f"; then
+            echo "$f"
+        fi
+    done)
+fi
+
+# Tally the third bucket: auto-merged AND identical (the happy path).
+AUTO_MERGED_MATCH_COUNT=0
+if [ -n "$AUTO_MERGED" ]; then
+    TOTAL_AUTO=$(echo "$AUTO_MERGED" | wc -l | tr -d ' ')
+    DIFF_AUTO=0
+    [ -n "$AUTO_MERGED_DIFFERS" ] && DIFF_AUTO=$(echo "$AUTO_MERGED_DIFFERS" | wc -l | tr -d ' ')
+    AUTO_MERGED_MATCH_COUNT=$((TOTAL_AUTO - DIFF_AUTO))
+fi
+
+# All other files in SOURCE's patch that don't appear in either bucket
+# auto-merged AND match HEAD — i.e. nothing to review for them.
+echo "── Bucket 1: auto-merged, identical to HEAD (provably correct) ────────"
+if [ -n "$AUTO_MERGED" ]; then
+    echo "$AUTO_MERGED" | while read -r f; do
+        [ -z "$f" ] && continue
+        if git diff --quiet "$TREE" "$HEAD_REF" -- "$f"; then
+            echo "  ✓ $f"
+        fi
+    done
+fi
+echo "  ($AUTO_MERGED_MATCH_COUNT file(s))"
+echo
+
+echo "── Bucket 2: auto-merged, but HEAD differs (REVIEW manual edits) ──────"
+if [ -z "$AUTO_MERGED_DIFFERS" ]; then
+    echo "  (none — all auto-merged files match HEAD)"
+else
+    echo "$AUTO_MERGED_DIFFERS" | sed 's/^/  ⚠ /'
+    echo
+    echo "  Diff (synthetic merge → HEAD) for these files:"
+    echo "$AUTO_MERGED_DIFFERS" | while read -r f; do
+        [ -z "$f" ] && continue
+        echo
+        git --no-pager diff "$TREE" "$HEAD_REF" -- "$f"
+    done
+fi
+echo
+
+echo "── Bucket 3: real conflicts (REVIEW your resolution choice) ───────────"
+if [ -z "$CONFLICTED_FILES" ]; then
+    echo "  (none)"
+else
+    echo "$CONFLICTED_FILES" | sed 's/^/  ⚠ /'
+    echo
+    echo "  For each: confirm that HEAD's version reflects an intentional"
+    echo "  resolution (took BASE, took SOURCE, hand-merged, regenerated, etc.)."
+    echo "  Useful follow-up commands:"
+    echo "    git diff $BASE_SHA $HEAD_SHA -- <file>     # what changed vs BASE"
+    echo "    git diff $SOURCE_SHA $HEAD_SHA -- <file>   # what changed vs SOURCE"
+fi
+echo
+
+echo "═══════════════════════════════════════════════════════════════════════"
+if [ -z "$AUTO_MERGED_DIFFERS" ] && [ -z "$CONFLICTED_FILES" ]; then
+    echo "  ✓ Fully verified: HEAD is exactly what git automerge produced."
+else
+    echo "  → Manual review required for files in Buckets 2 and 3 above."
+fi
+echo "═══════════════════════════════════════════════════════════════════════"
