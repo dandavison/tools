@@ -26,9 +26,19 @@ api_path="/repos/$owner/$repo/issues/$issue_number"
 # Fetch issue details
 issue=$(gh api "$api_path")
 title=$(echo "$issue" | jq -r '.title')
+title_yaml=$(echo "$issue" | jq '.title')
 body=$(echo "$issue" | jq -r '.body // ""')
 author=$(echo "$issue" | jq -r '.user.login')
 created_at=$(echo "$issue" | jq -r '.created_at')
+date="${created_at%%T*}"
+
+# Frontmatter
+echo "---"
+echo "number: $issue_number"
+echo "date: $date"
+echo "title: $title_yaml"
+echo "---"
+echo
 
 # Output issue title and body
 echo "# $title"
