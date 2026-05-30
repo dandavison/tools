@@ -4,7 +4,7 @@ processes() {
     (osqueryi --list --separator ',') <<EOF
 SELECT p.pid, p.name, p.cwd
 FROM processes AS p
-WHERE name like '%cursor%'
+WHERE name like '%Code Helper%'
 AND cwd like '/Users/dan/src/%'
 ORDER BY cwd;
 EOF
@@ -14,7 +14,7 @@ windows() {
     hs <<EOF
     for _, win in ipairs(hs.window.allWindows()) do
         local app = win:application()
-        if app:name() == "Cursor" then
+        if app:name() == "Code" then
             print(app:name() .. "," .. win:pid() .. "," .. win:title())
         end
     end

@@ -4,7 +4,7 @@ close-project() {
     local project="$1"
     osascript <<EOF
 tell application "System Events"
-    tell process "Cursor"
+    tell process "Code"
         repeat with w in windows
             log "Checking window: " & w's title
             if w's title ends with " — $project" then
