@@ -1,0 +1,68 @@
+#!/bin/bash
+#
+# claude-from-issues [-R owner/repo] <issue-number>...
+#
+# Start an interactive claude code session with the input buffer pre-seeded with
+# the content of the given GitHub issues (fetched via gh-issue-to-md). Each
+# issue's content is delivered as a bracketed paste so claude code collapses it
+# to its "[Pasted text #N +M lines]" placeholder. Nothing is submitted; the
+# cursor is left at the end of the seeded prompt.
+#
+# Requires tmux: claude takes over this pane and a background helper types into
+# it via tmux send-keys / paste-buffer.
+
+set -euo pipefail
+
+repo=dandavison/log
+if [[ "${1:-}" == "-R" ]]; then
+    repo="$2"
+    shift 2
+fi
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: claude-from-issues [-R owner/repo] <issue-number>..." >&2
+    exit 1
+fi
+
+if [[ -z "${TMUX:-}" ]]; then
+    echo "Error: claude-from-issues must be run inside tmux" >&2
+    exit 1
+fi
+
+pane="$TMUX_PANE"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+for n in "$@"; do
+    gh-issue-to-md "https://github.com/$repo/issues/$n" > "$tmpdir/$n.md"
+done
+
+send_newline() {
+    tmux send-keys -t "$pane" -H 5c  # backslash; with Enter, claude inserts a newline
+    tmux send-keys -t "$pane" Enter
+}
+
+(
+    # Wait for the claude code UI to render in the pane.
+    for _ in $(seq 30); do
+        if tmux capture-pane -t "$pane" -p | grep -qE 'Claude Code|shortcuts'; then
+            break
+        fi
+        sleep 0.5
+    done
+    sleep 1.5
+
+    for n in "$@"; do
+        tmux send-keys -t "$pane" -l "Here is the content of issue #$n from my log repo:"
+        send_newline
+        tmux load-buffer -b claude-from-issues "$tmpdir/$n.md"
+        tmux paste-buffer -p -d -b claude-from-issues -t "$pane"
+        sleep 0.3
+        send_newline
+        send_newline
+    done
+    rm -rf "$tmpdir"
+) &
+
+trap - EXIT
+exec claude
