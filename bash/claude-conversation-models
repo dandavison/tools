@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# claude-conversation-models
+#
+# Two-level fzf picker over Claude Code conversation logs:
+#   1. pick a project (the repo directory whose conversations you want)
+#   2. pick a conversation within it
+# then print the model responsible for each turn of that conversation.
+#
+# A "turn" is a user prompt followed by the assistant responses to it; we print
+# the prompt and the model(s) that answered it. The transcript keeps every
+# /rewind branch, so a prompt re-run under a different model appears more than
+# once, the later occurrence being the one on the current timeline.
+
+set -euo pipefail
+shopt -s nullglob
+
+projects_dir="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+[[ -d $projects_dir ]] || { echo "No projects dir: $projects_dir" >&2; exit 1; }
+command -v fzf >/dev/null || { echo "fzf is required" >&2; exit 1; }
+command -v jq  >/dev/null || { echo "jq is required" >&2; exit 1; }
+
+# Level 1: pick a project. Display the real cwd (read from any record that has
+# one), falling back to the de-slugified directory name.
+project=$(
+    for d in "$projects_dir"/*/; do
+        d=${d%/}
+        logs=("$d"/*.jsonl)
+        (( ${#logs[@]} )) || continue
+        cwd=$(jq -rc 'select(.cwd) | .cwd' "${logs[@]}" 2>/dev/null | head -1)
+        [[ -z $cwd ]] && cwd=$(basename "$d" | tr '-' '/')
+        printf '%s\t%s\n' "$cwd" "$d"
+    done | sort -u |
+    fzf --with-nth=1 --delimiter='\t' --prompt='project> ' \
+        --header='Select a project (repo)' |
+    cut -f2
+)
+[[ -n ${project:-} ]] || exit 0
+
+# Level 2: pick a conversation. Display ai-title (or first user prompt) + date.
+conversation=$(
+    for f in "$project"/*.jsonl; do
+        title=$(jq -rc 'select(.type=="ai-title") | .aiTitle' "$f" 2>/dev/null | tail -1)
+        if [[ -z $title ]]; then
+            title=$(jq -rc 'select(.type=="user" and (.message.content|type=="string") and (.isMeta != true)) | .message.content' "$f" 2>/dev/null \
+                | head -1 | tr '\n' ' ' | cut -c1-70)
+        fi
+        date=$(jq -rc 'select(.timestamp) | .timestamp' "$f" 2>/dev/null | head -1 | cut -c1-16)
+        printf '%s\t%s  %s\n' "$f" "${date:-?}" "${title:-(untitled)}"
+    done |
+    fzf --with-nth=2.. --delimiter='\t' --prompt='conversation> ' \
+        --header='Select a conversation' |
+    cut -f1
+)
+[[ -n ${conversation:-} ]] || exit 0
+
+# Output: each user turn, then the distinct model(s) that answered it.
+jq -rc '
+    if .type=="user" and ((.message?|type)=="object") and ((.message.content|type)=="string") and (.isMeta != true) then
+        "USER\t" + (.timestamp // "")[0:16] + "\t" + (.message.content | gsub("\\s+";" ") | .[0:78])
+    elif .type=="assistant" and ((.message?|type)=="object") then
+        "ASST\t" + (.timestamp // "")[0:16] + "\t" + (.message.model // "?")
+    else empty end
+' "$conversation" |
+awk -F'\t' '
+    $1=="USER" { printf "%s  %s\n", $2, $3; prev="" }
+    $1=="ASST" { if ($3!=prev) { printf "                    -> %s\n", $3; prev=$3 } }
+'
