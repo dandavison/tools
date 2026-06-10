@@ -16,7 +16,6 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_METRIC = "totalCost"
 VALID_METRICS = (
     "totalCost",
@@ -83,7 +82,9 @@ def parse_month(month_text: str) -> tuple[date, date]:
     try:
         start = datetime.strptime(f"{month_text}-01", "%Y-%m-%d").date()
     except ValueError as exc:
-        raise SystemExit(f"Invalid --month value {month_text!r}; expected YYYY-MM.") from exc
+        raise SystemExit(
+            f"Invalid --month value {month_text!r}; expected YYYY-MM."
+        ) from exc
     end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
     return start, end
 
@@ -96,7 +97,7 @@ def build_ccusage_commands(
     mode: str,
     project: str | None,
     offline: bool,
- ) -> list[list[str]]:
+) -> list[list[str]]:
     suffix = [
         "daily",
         "--json",
@@ -161,7 +162,11 @@ def normalize_project_name(name: str) -> str:
 
 
 def build_daily_points(
-    payload: dict[str, Any], metric: str, month_start: date, month_end: date, today: date
+    payload: dict[str, Any],
+    metric: str,
+    month_start: date,
+    month_end: date,
+    today: date,
 ) -> list[DailyPoint]:
     projects = payload.get("projects")
     if not isinstance(projects, dict):
@@ -240,7 +245,9 @@ def decimal_to_float(value: Decimal) -> float:
 def build_chart_model(
     points: list[DailyPoint], metric: str, month: str, today: date
 ) -> dict[str, Any]:
-    last_actual = next((point for point in reversed(points) if point.day <= today), None)
+    last_actual = next(
+        (point for point in reversed(points) if point.day <= today), None
+    )
     if last_actual is None:
         raise SystemExit("No points available for the requested range.")
 
@@ -253,8 +260,13 @@ def build_chart_model(
     target_slope = decimal_to_float(target_end_value) / days_in_month
     target = [round(target_slope * (index + 1), 4) for index in range(days_in_month)]
 
-    max_actual = max((point.cumulative for point in points if point.day <= today), default=Decimal("0"))
-    max_prediction = max((Decimal(str(value)) for value in prediction), default=Decimal("0"))
+    max_actual = max(
+        (point.cumulative for point in points if point.day <= today),
+        default=Decimal("0"),
+    )
+    max_prediction = max(
+        (Decimal(str(value)) for value in prediction), default=Decimal("0")
+    )
     y_max = max(max_actual, max_prediction, target_end_value, Decimal("1"))
 
     daily_data = []
@@ -263,12 +275,16 @@ def build_chart_model(
         daily_data.append(
             {
                 "date": point.day.isoformat(),
-                "label": point.day.strftime("%b %-d") if sys.platform != "win32" else point.day.strftime("%b %d").replace(" 0", " "),
+                "label": point.day.strftime("%b %-d")
+                if sys.platform != "win32"
+                else point.day.strftime("%b %d").replace(" 0", " "),
                 "day": point.day.day,
                 "dailyValue": decimal_to_float(point.value),
                 "dailyValueLabel": format_metric_value(metric, point.value),
                 "cumulative": None if is_future else decimal_to_float(point.cumulative),
-                "cumulativeLabel": None if is_future else format_metric_value(metric, point.cumulative),
+                "cumulativeLabel": None
+                if is_future
+                else format_metric_value(metric, point.cumulative),
                 "projects": [
                     {
                         "name": item.project,
