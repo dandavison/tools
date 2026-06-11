@@ -1,0 +1,76 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+#
+# Reflow a Claude Code transcript copied from the terminal into markdown.
+#
+# Input lines starting with ❯ (user) or ⏺ (assistant) open a turn; subsequent
+# indented lines are hard-wrapped continuations and blank lines separate
+# paragraphs. Output joins each paragraph onto one line, rendering user turns
+# as blockquotes and assistant turns as plain paragraphs.
+#
+# With a tty stdin, reads from the system clipboard instead:
+#   claude-to-md | cp
+
+import subprocess
+import sys
+
+USER, ASSISTANT = "❯", "⏺"
+
+
+def main() -> None:
+    text = sys.stdin.read() if not sys.stdin.isatty() else pbpaste()
+    print(render(parse_turns(text)), end="")
+
+
+def parse_turns(text: str) -> list[tuple[str, list[str]]]:
+    turns: list[tuple[str, list[str]]] = []
+    role, paragraphs, words = USER, [], []
+
+    def end_paragraph():
+        if words:
+            paragraphs.append(" ".join(words))
+            words.clear()
+
+    def end_turn():
+        nonlocal paragraphs
+        end_paragraph()
+        if paragraphs:
+            turns.append((role, paragraphs))
+            paragraphs = []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if line[:1] in (USER, ASSISTANT):
+            end_turn()
+            role = line[0]
+            line = line[1:].strip()
+        if line:
+            words.extend(line.split())
+        else:
+            end_paragraph()
+    end_turn()
+    return turns
+
+
+def render(turns: list[tuple[str, list[str]]]) -> str:
+    blocks = []
+    for role, paragraphs in turns:
+        if role == USER:
+            blocks.append("\n>\n".join(f"> {p}" for p in paragraphs))
+        else:
+            blocks.append("\n\n".join(paragraphs))
+    return "\n\n".join(blocks) + "\n" if blocks else ""
+
+
+def pbpaste() -> str:
+    return subprocess.run(
+        ["pbpaste"], capture_output=True, text=True, check=True
+    ).stdout
+
+
+if __name__ == "__main__":
+    main()
