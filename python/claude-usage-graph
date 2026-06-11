@@ -57,14 +57,6 @@ def parse_args() -> argparse.Namespace:
         choices=VALID_METRICS,
         help="Metric to graph from ccusage output.",
     )
-    parser.add_argument("--locale", help="Locale to pass through to ccusage.")
-    parser.add_argument(
-        "--mode",
-        choices=("auto", "calculate", "display"),
-        default="auto",
-        help="Cost mode to pass through to ccusage.",
-    )
-    parser.add_argument("--project", help="Project filter to pass through to ccusage.")
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -93,28 +85,16 @@ def build_ccusage_commands(
     *,
     since: date,
     until: date,
-    locale: str | None,
-    mode: str,
-    project: str | None,
     offline: bool,
 ) -> list[list[str]]:
     suffix = [
         "daily",
         "--json",
-        "--instances",
         "--since",
         since.strftime("%Y%m%d"),
         "--until",
         until.strftime("%Y%m%d"),
-        "--mode",
-        mode,
-        "--order",
-        "asc",
     ]
-    if locale:
-        suffix.extend(["--locale", locale])
-    if project:
-        suffix.extend(["--project", project])
     if offline:
         suffix.append("--offline")
     return [["npx", "-y", "ccusage", *suffix]]
@@ -168,60 +148,32 @@ def build_daily_points(
     month_end: date,
     today: date,
 ) -> list[DailyPoint]:
-    projects = payload.get("projects")
-    if not isinstance(projects, dict):
-        raise SystemExit("ccusage JSON did not contain a top-level 'projects' object.")
+    rows = payload.get("daily")
+    if not isinstance(rows, list):
+        raise SystemExit("ccusage JSON did not contain a top-level 'daily' array.")
 
-    daily_projects: dict[date, list[ProjectBreakdown]] = {}
-
-    for project_name, rows in projects.items():
-        if not isinstance(project_name, str) or not isinstance(rows, list):
+    by_day: dict[date, Decimal] = {}
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        normalized_name = normalize_project_name(project_name)
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            raw_date = row.get("date")
-            if not isinstance(raw_date, str):
-                continue
-            day = datetime.strptime(raw_date, "%Y-%m-%d").date()
-            if day < month_start or day > min(month_end, today):
-                continue
-            daily_projects.setdefault(day, []).append(
-                ProjectBreakdown(
-                    project=normalized_name,
-                    value=decimal_value(row.get(metric)),
-                )
-            )
+        raw_date = row.get("period")
+        if not isinstance(raw_date, str):
+            continue
+        day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        if day < month_start or day > min(month_end, today):
+            continue
+        by_day[day] = decimal_value(row.get(metric))
 
     points: list[DailyPoint] = []
     cumulative = Decimal("0")
     day = month_start
     while day <= month_end:
-        projects_for_day = sorted(
-            daily_projects.get(day, []),
-            key=lambda item: (-item.value, item.project),
-        )
-        day_value = sum((item.value for item in projects_for_day), start=Decimal("0"))
+        day_value = by_day.get(day, Decimal("0"))
         if day <= today:
             cumulative += day_value
-            points.append(
-                DailyPoint(
-                    day=day,
-                    value=day_value,
-                    cumulative=cumulative,
-                    projects=projects_for_day,
-                )
-            )
+            points.append(DailyPoint(day=day, value=day_value, cumulative=cumulative, projects=[]))
         else:
-            points.append(
-                DailyPoint(
-                    day=day,
-                    value=Decimal("0"),
-                    cumulative=Decimal("0"),
-                    projects=[],
-                )
-            )
+            points.append(DailyPoint(day=day, value=Decimal("0"), cumulative=Decimal("0"), projects=[]))
         day += timedelta(days=1)
     return points
 
@@ -687,9 +639,6 @@ def main() -> None:
         build_ccusage_commands(
             since=month_start,
             until=until,
-            locale=args.locale,
-            mode=args.mode,
-            project=args.project,
             offline=args.offline,
         )
     )
