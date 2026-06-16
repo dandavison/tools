@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Print the sequence of user prompts (no model replies) for one Claude Code session.
+
+The session is identified by its ID (full or unique prefix) or by its name
+(the `customTitle` set via -n/--rename, else the auto-generated `aiTitle`).
+All projects under ~/.claude/projects/ are searched.
+
+Each prompt is shown on one line by default, clipped to the terminal width.
+--truncate N allows up to N wrapped lines per prompt (N<=0 means no limit).
+
+Usage:
+    claude-session-prompts <id-or-name> [--truncate N]
+"""
+
+import argparse
+import glob
+import json
+import os
+import shutil
+import sys
+import textwrap
+from typing import Any, cast
+
+
+def all_transcripts() -> list[str]:
+    return glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
+
+
+def stem(path: str) -> str:
+    return os.path.basename(path)[:-6]
+
+
+def resolve(identifier: str, files: list[str]) -> str:
+    ident = identifier.lower()
+    by_id = [f for f in files if stem(f).lower().startswith(ident)]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        sys.exit(ambiguous("id prefix", [(stem(f), read_title(f)) for f in by_id]))
+
+    by_name = [(f, t) for f in files if (t := read_title(f)) and ident in t.lower()]
+    if len(by_name) == 1:
+        return by_name[0][0]
+    if len(by_name) > 1:
+        sys.exit(ambiguous("name", [(stem(f), t) for f, t in by_name]))
+    sys.exit(f"no session matching {identifier!r} under ~/.claude/projects/")
+
+
+def ambiguous(kind: str, candidates: list[tuple[str, str | None]]) -> str:
+    lines = "\n".join(f"  {sid[:8]}  {title or ''}" for sid, title in candidates)
+    return f"{len(candidates)} sessions match that {kind}; be more specific:\n{lines}"
+
+
+def read_title(path: str) -> str | None:
+    custom = ai = None
+    for line in open(path, errors="ignore"):
+        if '"customTitle"' not in line and '"aiTitle"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        custom = obj.get("customTitle") or custom
+        ai = obj.get("aiTitle") or ai
+    return custom or ai
+
+
+def user_prompts(path: str) -> list[str]:
+    prompts: list[str] = []
+    for line in open(path, errors="ignore"):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "user" or obj.get("isMeta"):
+            continue
+        text = prompt_text(obj.get("message", {}).get("content"))
+        if text:
+            prompts.append(text)
+    return prompts
+
+
+def prompt_text(content: object) -> str | None:
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        blocks = [cast(dict[str, Any], b) for b in content if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return None
+        text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    else:
+        return None
+    text = " ".join(text.split())
+    if not text or text.startswith("<"):
+        return None
+    return text
+
+
+def render(prompts: list[str], truncate: int, width: int) -> None:
+    for i, prompt in enumerate(prompts, 1):
+        prefix = f"{i:>3}  "
+        cont = " " * len(prefix)
+        lines = textwrap.wrap(prompt, max(1, width - len(prefix))) or [""]
+        limit = len(lines) if truncate <= 0 else truncate
+        shown = lines[:limit]
+        more = len(lines) > limit
+        for j, line in enumerate(shown):
+            body = line
+            if more and j == len(shown) - 1:
+                budget = width - len(prefix)
+                body = (line if len(line) <= budget - 1 else line[: budget - 1]) + "…"
+            print((prefix if j == 0 else cont) + body)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Print a Claude Code session's user prompts."
+    )
+    parser.add_argument("identifier", help="session id (full or prefix) or name")
+    parser.add_argument(
+        "--truncate",
+        type=int,
+        default=1,
+        metavar="N",
+        help="max lines per prompt (<=0: no limit)",
+    )
+    args = parser.parse_args()
+
+    path = resolve(args.identifier, all_transcripts())
+    render(user_prompts(path), args.truncate, shutil.get_terminal_size().columns)
+
+
+if __name__ == "__main__":
+    main()
