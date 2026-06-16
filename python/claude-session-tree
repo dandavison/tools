@@ -6,16 +6,22 @@ records `forkedFrom: {sessionId, messageUuid}`, so the tree is reconstructable
 from the `.jsonl` files under ~/.claude/projects/<dir-slug>/.
 
 Usage:
-    claude-session-tree [path-or-slug]
+    claude-session-tree [path-or-slug] [--since "1 week"]
 
 With no argument, uses the current working directory. You may pass either a
 project path (e.g. ~/src/foo) or a pre-computed slug (e.g. -Users-dan-src-foo).
+--since keeps only sessions touched within the window (and their ancestors,
+so the tree stays connected); e.g. "2 days", "1 week", "3h".
 """
 
+import argparse
 import glob
 import json
 import os
+import re
+import shutil
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -33,6 +39,19 @@ class Session:
 def slug_for(arg: str | None) -> str:
     target = os.path.abspath(os.path.expanduser(arg)) if arg else os.getcwd()
     return "-" + target.strip("/").replace("/", "-")
+
+
+SECONDS = {"s": 1, "min": 60, "h": 3600, "hour": 3600, "day": 86400, "week": 604800}
+
+
+def parse_since(spec: str) -> float:
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([a-z]+?)s?\s*", spec.lower())
+    if not m:
+        sys.exit(f"unparseable --since {spec!r} (try '2 days', '1 week', '3h')")
+    qty, unit = float(m.group(1)), m.group(2)
+    if unit not in SECONDS:
+        sys.exit(f"unknown --since unit {unit!r} (use s/min/h/hour/day/week)")
+    return qty * SECONDS[unit]
 
 
 def load_sessions(directory: str) -> dict[str, Session]:
@@ -95,28 +114,62 @@ def label(s: Session) -> str:
     return f"{name}{s.sid[:8]}  ({s.turns} turns)  {prompt}"
 
 
+def subtree_max_mtime(sid: str, sessions: dict[str, Session], forest: Forest) -> float:
+    return max(
+        [sessions[sid].mtime]
+        + [subtree_max_mtime(c, sessions, forest) for c in forest.children[sid]]
+    )
+
+
+def emit(line: str, width: int) -> None:
+    print(line if len(line) <= width else line[: width - 1] + "…")
+
+
 def walk(
-    sid: str, sessions: dict[str, Session], forest: Forest, prefix: str, last: bool
+    sid: str,
+    sessions: dict[str, Session],
+    forest: Forest,
+    visible: set[str],
+    width: int,
+    prefix: str,
+    last: bool,
 ) -> None:
-    print(prefix + ("└─ " if last else "├─ ") + label(sessions[sid]))
-    kids = sorted(forest.children[sid], key=lambda c: sessions[c].mtime)
+    emit(prefix + ("└─ " if last else "├─ ") + label(sessions[sid]), width)
+    kids = sorted(
+        (c for c in forest.children[sid] if c in visible),
+        key=lambda c: sessions[c].mtime,
+    )
     child_prefix = prefix + ("   " if last else "│  ")
     for i, kid in enumerate(kids):
-        walk(kid, sessions, forest, child_prefix, i == len(kids) - 1)
+        walk(kid, sessions, forest, visible, width, child_prefix, i == len(kids) - 1)
 
 
 def main() -> None:
-    directory = os.path.expanduser(
-        f"~/.claude/projects/{slug_for(sys.argv[1] if len(sys.argv) > 1 else None)}"
+    parser = argparse.ArgumentParser(
+        description="Render the Claude Code session fork tree."
     )
+    parser.add_argument("path", nargs="?", help="project path or slug (default: cwd)")
+    parser.add_argument("--since", help='window, e.g. "2 days", "1 week", "3h"')
+    args = parser.parse_args()
+
+    cutoff = time.time() - parse_since(args.since) if args.since else None
+    directory = os.path.expanduser(f"~/.claude/projects/{slug_for(args.path)}")
     if not os.path.isdir(directory):
         sys.exit(f"no sessions directory: {directory}")
     sessions = load_sessions(directory)
     forest = build_forest(sessions)
-    print(f"sessions dir: {directory}\n({len(sessions)} session files)\n")
-    roots = sorted(forest.roots, key=lambda r: sessions[r].mtime)
+    visible = {
+        sid
+        for sid in sessions
+        if cutoff is None or subtree_max_mtime(sid, sessions, forest) >= cutoff
+    }
+    width = shutil.get_terminal_size().columns
+    print(f"sessions dir: {directory}\n({len(visible)}/{len(sessions)} sessions)\n")
+    roots = sorted(
+        (r for r in forest.roots if r in visible), key=lambda r: sessions[r].mtime
+    )
     for root in roots:
-        walk(root, sessions, forest, "", True)
+        walk(root, sessions, forest, visible, width, "", True)
 
 
 if __name__ == "__main__":
