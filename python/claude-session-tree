@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Render the fork tree of Claude Code sessions for a project directory.
+
+Claude Code has no built-in session-tree view. Each forked session's transcript
+records `forkedFrom: {sessionId, messageUuid}`, so the tree is reconstructable
+from the `.jsonl` files under ~/.claude/projects/<dir-slug>/.
+
+Usage:
+    claude-session-tree [path-or-slug]
+
+With no argument, uses the current working directory. You may pass either a
+project path (e.g. ~/src/foo) or a pre-computed slug (e.g. -Users-dan-src-foo).
+"""
+
+import glob
+import json
+import os
+import sys
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Session:
+    sid: str
+    mtime: float
+    parent: str | None = None
+    name: str | None = None
+    first_prompt: str | None = None
+    turns: int = 0
+
+
+def slug_for(arg: str | None) -> str:
+    target = os.path.abspath(os.path.expanduser(arg)) if arg else os.getcwd()
+    return "-" + target.strip("/").replace("/", "-")
+
+
+def load_sessions(directory: str) -> dict[str, Session]:
+    sessions: dict[str, Session] = {}
+    for path in glob.glob(os.path.join(directory, "*.jsonl")):
+        sid = os.path.basename(path)[:-6]
+        s = Session(sid=sid, mtime=os.path.getmtime(path))
+        for line in open(path, errors="ignore"):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            forked = obj.get("forkedFrom")
+            if forked and s.parent is None:
+                s.parent = forked.get("sessionId")
+            s.name = s.name or obj.get("customName") or obj.get("sessionName")
+            if obj.get("type") == "user":
+                s.turns += 1
+                if s.first_prompt is None:
+                    s.first_prompt = first_text(obj)
+        sessions[sid] = s
+    return sessions
+
+
+def first_text(obj: dict) -> str | None:
+    content = obj.get("message", {}).get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = " ".join(x.get("text", "") for x in content if isinstance(x, dict))
+    else:
+        return None
+    text = text.strip().replace("\n", " ")
+    if not text or text.startswith("<"):
+        return None
+    return text[:60]
+
+
+@dataclass
+class Forest:
+    children: dict[str | None, list[str]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    roots: list[str] = field(default_factory=list)
+
+
+def build_forest(sessions: dict[str, Session]) -> Forest:
+    forest = Forest()
+    for sid, s in sessions.items():
+        if s.parent in sessions:
+            forest.children[s.parent].append(sid)
+        else:
+            forest.roots.append(sid)
+    return forest
+
+
+def label(s: Session) -> str:
+    name = f"[{s.name}] " if s.name else ""
+    prompt = s.first_prompt or ""
+    return f"{name}{s.sid[:8]}  ({s.turns} turns)  {prompt}"
+
+
+def walk(
+    sid: str, sessions: dict[str, Session], forest: Forest, prefix: str, last: bool
+) -> None:
+    print(prefix + ("└─ " if last else "├─ ") + label(sessions[sid]))
+    kids = sorted(forest.children[sid], key=lambda c: sessions[c].mtime)
+    child_prefix = prefix + ("   " if last else "│  ")
+    for i, kid in enumerate(kids):
+        walk(kid, sessions, forest, child_prefix, i == len(kids) - 1)
+
+
+def main() -> None:
+    directory = os.path.expanduser(
+        f"~/.claude/projects/{slug_for(sys.argv[1] if len(sys.argv) > 1 else None)}"
+    )
+    if not os.path.isdir(directory):
+        sys.exit(f"no sessions directory: {directory}")
+    sessions = load_sessions(directory)
+    forest = build_forest(sessions)
+    print(f"sessions dir: {directory}\n({len(sessions)} session files)\n")
+    roots = sorted(forest.roots, key=lambda r: sessions[r].mtime)
+    for root in roots:
+        walk(root, sessions, forest, "", True)
+
+
+if __name__ == "__main__":
+    main()
