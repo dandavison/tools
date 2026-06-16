@@ -31,9 +31,14 @@ class Session:
     sid: str
     mtime: float
     parent: str | None = None
-    name: str | None = None
+    custom_title: str | None = None
+    ai_title: str | None = None
     first_prompt: str | None = None
     turns: int = 0
+
+    @property
+    def name(self) -> str | None:
+        return self.custom_title or self.ai_title
 
 
 def slug_for(arg: str | None) -> str:
@@ -67,7 +72,8 @@ def load_sessions(directory: str) -> dict[str, Session]:
             forked = obj.get("forkedFrom")
             if forked and s.parent is None:
                 s.parent = forked.get("sessionId")
-            s.name = s.name or obj.get("customName") or obj.get("sessionName")
+            s.custom_title = obj.get("customTitle") or s.custom_title
+            s.ai_title = obj.get("aiTitle") or s.ai_title
             if obj.get("type") == "user":
                 s.turns += 1
                 if s.first_prompt is None:
