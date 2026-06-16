@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Print the model responsible for each turn of one Claude Code session.
+
+The session is identified by its ID (full or unique prefix) or by its name
+(the `customTitle` set via -n/--rename, else the auto-generated `aiTitle`).
+All projects under ~/.claude/projects/ are searched.
+
+A "turn" is a user prompt followed by the assistant responses to it; we print
+the prompt and the distinct model(s) that answered it. The transcript keeps
+every /rewind branch, so a prompt re-run under a different model appears more
+than once, the later occurrence being the one on the current timeline.
+
+Usage:
+    claude-session-models <id-or-name>
+"""
+
+import glob
+import json
+import os
+import shutil
+import sys
+from typing import Any, cast
+
+
+def all_transcripts() -> list[str]:
+    return glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
+
+
+def stem(path: str) -> str:
+    return os.path.basename(path)[:-6]
+
+
+def resolve(identifier: str, files: list[str]) -> str:
+    ident = identifier.lower()
+    by_id = [f for f in files if stem(f).lower().startswith(ident)]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        sys.exit(ambiguous("id prefix", [(stem(f), read_title(f)) for f in by_id]))
+
+    by_name = [(f, t) for f in files if (t := read_title(f)) and ident in t.lower()]
+    if len(by_name) == 1:
+        return by_name[0][0]
+    if len(by_name) > 1:
+        sys.exit(ambiguous("name", [(stem(f), t) for f, t in by_name]))
+    sys.exit(f"no session matching {identifier!r} under ~/.claude/projects/")
+
+
+def ambiguous(kind: str, candidates: list[tuple[str, str | None]]) -> str:
+    lines = "\n".join(f"  {sid[:8]}  {title or ''}" for sid, title in candidates)
+    return f"{len(candidates)} sessions match that {kind}; be more specific:\n{lines}"
+
+
+def read_title(path: str) -> str | None:
+    custom = ai = None
+    for line in open(path, errors="ignore"):
+        if '"customTitle"' not in line and '"aiTitle"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        custom = obj.get("customTitle") or custom
+        ai = obj.get("aiTitle") or ai
+    return custom or ai
+
+
+def turns(path: str):
+    for line in open(path, errors="ignore"):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            continue
+        ts = (obj.get("timestamp") or "")[:16]
+        if obj.get("type") == "user" and not obj.get("isMeta"):
+            text = prompt_text(msg.get("content"))
+            if text:
+                yield "user", ts, text
+        elif obj.get("type") == "assistant":
+            yield "asst", ts, msg.get("model") or "?"
+
+
+def prompt_text(content: object) -> str | None:
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        blocks = [cast(dict[str, Any], b) for b in content if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return None
+        text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    else:
+        return None
+    text = " ".join(text.split())
+    if not text or text.startswith("<"):
+        return None
+    return text
+
+
+def render(path: str, width: int) -> None:
+    prev_model = None
+    for kind, ts, val in turns(path):
+        if kind == "user":
+            line = f"{ts}  {val}"
+            print(line if len(line) <= width else line[: width - 1] + "…")
+            prev_model = None
+        elif val != prev_model:
+            print(f"{'':18}-> {val}")
+            prev_model = val
+
+
+def main() -> None:
+    if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
+        sys.exit(__doc__)
+    path = resolve(sys.argv[1], all_transcripts())
+    render(path, shutil.get_terminal_size().columns)
+
+
+if __name__ == "__main__":
+    main()

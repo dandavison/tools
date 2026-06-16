@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 #
-# claude-conversation-models
+# claude-conversation-apply
 #
-# Two-level fzf picker over Claude Code conversation logs:
+# Three-level fzf picker that dispatches a Claude Code conversation to a
+# single-conversation tool:
 #   1. pick a project (the repo directory whose conversations you want)
 #   2. pick a conversation within it
-# then print the model responsible for each turn of that conversation.
+#   3. pick an action
+# then exec `<action> <session-id>`.
 #
-# A "turn" is a user prompt followed by the assistant responses to it; we print
-# the prompt and the model(s) that answered it. The transcript keeps every
-# /rewind branch, so a prompt re-run under a different model appears more than
-# once, the later occurrence being the one on the current timeline.
+# An action is any sibling script named claude-session-* in this codebase's
+# bash/ or python/ dirs. The dispatch contract: a script operating on a single
+# Claude conversation is named claude-session-* and takes the session id (full,
+# unique prefix, or name) as its first positional argument.
 
 set -euo pipefail
 shopt -s nullglob
 
 projects_dir="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+tools_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 [[ -d $projects_dir ]] || { echo "No projects dir: $projects_dir" >&2; exit 1; }
 command -v fzf >/dev/null || { echo "fzf is required" >&2; exit 1; }
@@ -55,15 +58,18 @@ conversation=$(
 )
 [[ -n ${conversation:-} ]] || exit 0
 
-# Output: each user turn, then the distinct model(s) that answered it.
-jq -rc '
-    if .type=="user" and ((.message?|type)=="object") and ((.message.content|type)=="string") and (.isMeta != true) then
-        "USER\t" + (.timestamp // "")[0:16] + "\t" + (.message.content | gsub("\\s+";" ") | .[0:78])
-    elif .type=="assistant" and ((.message?|type)=="object") then
-        "ASST\t" + (.timestamp // "")[0:16] + "\t" + (.message.model // "?")
-    else empty end
-' "$conversation" |
-awk -F'\t' '
-    $1=="USER" { printf "%s  %s\n", $2, $3; prev="" }
-    $1=="ASST" { if ($3!=prev) { printf "                    -> %s\n", $3; prev=$3 } }
-'
+session_id=$(basename "$conversation" .jsonl)
+
+# Level 3: pick an action (any claude-session-* tool) and dispatch.
+action=$(
+    for f in "$tools_root"/bash/claude-session-* "$tools_root"/python/claude-session-*; do
+        [[ -x $f ]] || continue
+        printf '%s\t%s\n' "$f" "$(basename "$f")"
+    done |
+    fzf --with-nth=2 --delimiter='\t' --prompt='action> ' \
+        --header="Apply to ${session_id:0:8}" |
+    cut -f1
+)
+[[ -n ${action:-} ]] || exit 0
+
+exec "$action" "$session_id"

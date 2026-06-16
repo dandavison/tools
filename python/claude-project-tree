@@ -6,7 +6,7 @@ records `forkedFrom: {sessionId, messageUuid}`, so the tree is reconstructable
 from the `.jsonl` files under ~/.claude/projects/<dir-slug>/.
 
 Usage:
-    claude-session-tree [path-or-slug] [--since "1 week"]
+    claude-project-tree [path-or-slug] [--since "1 week"]
 
 With no argument, uses the current working directory. You may pass either a
 project path (e.g. ~/src/foo) or a pre-computed slug (e.g. -Users-dan-src-foo).
