@@ -1,0 +1,1 @@
+Please ensure that all new tools are symlinked into $PATH by running tools/bash/bin on them.
