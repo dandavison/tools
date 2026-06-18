@@ -1,0 +1,9 @@
+#!/bin/bash
+# Open a modal tmux popup. With args, run them as the popup command; with none,
+# an interactive shell in the current pane's directory.
+# Dismiss by exiting the inner program: Ctrl-D or `exit` for a shell.
+
+[ -n "$TMUX" ] || { echo "Error: tmux-popup must be run inside tmux" >&2; exit 1; }
+
+tmux display-popup -E -w 70% -h 70% -b rounded -T " popup " \
+    -d "#{pane_current_path}" "$@"

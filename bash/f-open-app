@@ -19,7 +19,10 @@ if [ "$1" = "--pick" ]; then
     exit
 fi
 
-[ -n "$TMUX" ] || { echo "Error: f-open-app must be run inside tmux" >&2; exit 1; }
+[ -n "$TMUX" ] || {
+    echo "Error: f-open-app must be run inside tmux" >&2
+    exit 1
+}
 
 tmux display-popup -E -w 60% -h 70% -b rounded -T " open app " \
     "$(printf '%q' "$(readlink -f "$0")") --pick"
