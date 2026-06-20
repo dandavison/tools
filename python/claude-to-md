@@ -28,7 +28,7 @@ def main() -> None:
 
 def parse_turns(text: str) -> list[tuple[str, list[str]]]:
     turns: list[tuple[str, list[str]]] = []
-    role, paragraphs, words = USER, [], []
+    role, paragraphs, words = ASSISTANT, [], []
 
     def end_paragraph():
         if words:
