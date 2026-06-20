@@ -50,6 +50,7 @@ def main(argv: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return 0 if argv else 2
     cmd = ["rg", *DEFAULTS, *argv, str(CONVERSATIONS_DIR)]
+    os.environ["RGI_PREVIEW_RAW"] = "1"  # bat (highlight + scroll-to-match), not mdcat rendering
     os.execvp("rgi", [shlex.quote(s) for s in cmd])
 
 
