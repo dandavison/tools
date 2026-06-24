@@ -10,7 +10,8 @@ function hyperlink() {
 if echo "$@" | rg -q '(^| )\-[^- ]*l[^-]+' || [[ "$*" == *" --files-with-matches "* ]]; then
     rg --hidden -g '!.git/*' "$@" | while read path; do
         abspath=$(readlink -f -- "$path")
-        url="vscode://file/$abspath"
+        # Editor-agnostic: the wormhole daemon opens this in the current editor.
+        url="http://wormhole:7117/file/$abspath?land-in=editor"
         hyperlink "$url" "$path"
     done
 else

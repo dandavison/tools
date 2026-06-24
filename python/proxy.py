@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+#
+# NOTE: This hardcodes the `vscode-insiders://` scheme and a hardcoded "Code"
+# window-title match in `focus_vscode_workspace`, so it is not editor-agnostic.
+# It is superseded by the wormhole daemon's own `/file/` endpoint, which opens
+# in the current editor and focuses the right workspace. Left unparameterized
+# because it appears unused; prefer wormhole's `/file/` route over reviving it.
 import re
 import subprocess
 import sys
