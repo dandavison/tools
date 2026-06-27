@@ -1,0 +1,8 @@
+#!/bin/sh
+# Shim: route LSP-server invocations through a shared gopls daemon so multiple
+# clients (Claude Code sessions, editors) on the same workspace share one cache
+# instead of each holding a ~1GB typecheck cache. See `gopls help remote`.
+# Absolute path avoids re-invoking this shim (~/bin precedes ~/go/bin on PATH).
+real=/Users/dan/go/bin/gopls
+[ $# -eq 0 ] && exec "$real" -remote=auto   # no subcommand => `serve`: the LSP launch
+exec "$real" "$@"                           # version/CLI/etc.: pass through untouched
