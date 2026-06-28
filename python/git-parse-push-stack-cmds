@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+
+"""
+Read `git log` output on stdin and, for each commit whose subject ends with a
+`(remote-branch:<branch>)` tag, print the force-push command that updates that
+remote branch to the commit:
+
+    git push -f origin <sha>:refs/heads/<branch>
+
+Usage:
+
+    git log | git-push-stack-remote-branches
+"""
+
+import re
+import sys
+
+TAG = re.compile(r"\(remote-branch:([^)]+)\)\s*$")
+
+
+def main() -> None:
+    sha = None
+    for line in sys.stdin:
+        m = re.match(r"commit ([0-9a-f]{7,40})", line)
+        if m:
+            sha = m.group(1)
+            continue
+        tag = TAG.search(line.strip())
+        if sha and tag:
+            print(f"git push -f origin {sha}:refs/heads/{tag.group(1)}")
+            sha = None
+
+
+if __name__ == "__main__":
+    main()
