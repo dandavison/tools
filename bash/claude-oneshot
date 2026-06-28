@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# read a prompt from stdin/terminal, then run claude one-shot.
+set -euo pipefail
+
+prompt="$(rlwrap cat)"
+
+set +e
+claude -p --output-format stream-json --verbose "$prompt" |
+  jq -j --unbuffered '
+      if .type == "assistant" then
+        ( .message.content[]? |
+          if   .type == "text"     then .text
+          elif .type == "tool_use" then "\n\u001b[2m[tool: \(.name)]\u001b[0m\n"
+          else empty end )
+      elif .type == "result" then
+        "\n\n\u001b[2m--- done: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd // 0 | .*10000|round/10000) ---\u001b[0m\n"
+      else empty end
+    '
+rc=${PIPESTATUS[0]}
+set -e
+exit "$rc"
