@@ -7,15 +7,33 @@ prompt="$(rlwrap cat)"
 
 set +e
 claude -p --output-format stream-json --verbose "$prompt" |
-  jq -j --unbuffered '
-      if .type == "assistant" then
-        ( .message.content[]? |
-          if   .type == "text"     then .text
-          elif .type == "tool_use" then "\n\u001b[2m[tool: \(.name)]\u001b[0m\n"
-          else empty end )
-      elif .type == "result" then
-        "\n\n\u001b[2m--- done: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd // 0 | .*10000|round/10000) ---\u001b[0m\n"
-      else empty end
+  jq -nj --unbuffered '
+      foreach inputs as $e (
+        {last: null, out: ""};
+        reduce (
+          if $e.type == "assistant" then
+            ( $e.message.content[]? |
+              if   .type == "text"     then {k: "text", v: .text}
+              elif .type == "tool_use" then {k: "tool", v: .name}
+              else empty end )
+          elif $e.type == "result" then
+            {k: "result", v: "\($e.subtype), \($e.num_turns) turns, $\($e.total_cost_usd // 0 | .*10000|round/10000)"}
+          else empty end
+        ) as $it (
+          {last: .last, out: ""};
+          if $it.k == "tool" then
+            if .last == $it.v
+            then {last: .last, out: (.out + "[2m·[0m")}
+            else {last: $it.v, out: (.out + "\n[2m[tool: \($it.v)][0m")}
+            end
+          elif $it.k == "text" then
+            {last: null, out: (.out + (if .last != null then "\n" else "" end) + $it.v)}
+          else
+            {last: null, out: (.out + "\n\n[2m--- done: \($it.v) ---[0m\n")}
+          end
+        );
+        .out
+      )
     '
 rc=${PIPESTATUS[0]}
 set -e
