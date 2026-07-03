@@ -1,0 +1,2 @@
+git symbolic-ref refs/heads/main refs/heads/master
+git symbolic-ref refs/remotes/origin/main refs/remotes/origin/master
