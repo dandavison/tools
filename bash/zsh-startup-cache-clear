@@ -1,0 +1,19 @@
+#!/bin/bash
+#
+# zsh-startup-cache-clear
+#
+# Clear everything cached to speed up shell startup, so it regenerates on the
+# next shell. Currently: generated completion scripts (temporal, uv, delta,
+# should, ...) and vivid's LS_COLORS. See env.sh ($ZSH_STARTUP_CACHE) and
+# load-completions in ~/src/devenv/shell-config/completion.sh. Run after
+# upgrading a tool (new subcommands/flags) or vivid (new theme output).
+set -euo pipefail
+
+dir="${ZSH_STARTUP_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-startup}"
+
+if [[ -d $dir ]]; then
+    rm -rf "$dir"
+    echo "Cleared $dir; startup caches regenerate on next shell."
+else
+    echo "Nothing to clear ($dir does not exist)."
+fi
