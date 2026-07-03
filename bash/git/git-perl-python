@@ -1,0 +1,2 @@
+#!/bin/bash
+git ls-files '**/*.py' | xargs -P 0 perl -pi -e "$@"

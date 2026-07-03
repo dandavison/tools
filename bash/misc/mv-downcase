@@ -1,0 +1,3 @@
+#!/bin/bash
+f=$(mktemp -u)
+mv "$1" "$f" && mv "$f" $(tr "[:upper:]" "[:lower:]" <<<"$1")

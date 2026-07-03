@@ -1,0 +1,2 @@
+#!/bin/bash
+git grep "$2" $(git grep -l "$1")

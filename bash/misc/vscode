@@ -1,0 +1,11 @@
+#!/bin/bash
+editor="$(editor-cli)"
+if [ -z "$1" ]; then
+    if ls | rg -q '\.code-workspace$'; then
+        "$editor" *.code-workspace
+    else
+        "$editor" .
+    fi
+else
+    "$editor" -g "$@"
+fi

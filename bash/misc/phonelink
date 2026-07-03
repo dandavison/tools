@@ -1,0 +1,11 @@
+#!/bin/bash
+python -m http.server 8000 &
+server_pid=$!
+sleep 2
+ngrok http 8000 &
+ngrok_pid=$!
+sleep 3
+url=$(curl -s http://localhost:4040/api/tunnels | python -c "import sys, json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
+qrencode -tANSI "$url/$*"
+echo "Server: $url/$*"
+wait $server_pid $ngrok_pid

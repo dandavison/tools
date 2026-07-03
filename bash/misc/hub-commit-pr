@@ -1,0 +1,3 @@
+#!/bin/bash
+head=$(git symbolic-ref --short HEAD)
+EDITOR='emacsclient -n' hub pull-request -b dev:master -h dev:$head $1

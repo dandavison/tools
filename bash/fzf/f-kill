@@ -1,0 +1,5 @@
+#!/bin/bash
+ps aux |
+    fzf --multi |
+    awk '{print $2}' |
+    xargs kill "$@"

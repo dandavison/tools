@@ -1,0 +1,4 @@
+#!/bin/bash
+file=$1
+until [[ -e $file ]]; do sleep 0.1; done
+tail -f $file

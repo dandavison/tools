@@ -1,0 +1,2 @@
+#!/bin/bash
+printf 'http://wormhole:7117/file/%s%s?land-in=editor' "$1" "${2:+:$2}"

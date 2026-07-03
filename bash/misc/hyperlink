@@ -1,0 +1,4 @@
+#!/bin/bash
+url="$1"
+text="$2"
+printf '\e]8;;%s\e\\%s\e]8;;\e\\\n' "$url" "$text"

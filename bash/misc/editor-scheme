@@ -1,0 +1,7 @@
+#!/bin/bash
+e="$(editor-cli)"
+case "$e" in
+    code) echo vscode ;;
+    code-insiders) echo vscode-insiders ;;
+    *) echo "$e" ;;
+esac

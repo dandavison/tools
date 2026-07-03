@@ -1,0 +1,6 @@
+#!/bin/bash
+merge_commit=$1
+git rev-list --parents -n1 $merge_commit | (
+    read merge parent1 parent2
+    git diff $2 $parent1...$parent2
+)

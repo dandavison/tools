@@ -1,0 +1,12 @@
+#!/bin/bash
+port=${1:-5555}
+package_dir=~/tmp/packages
+image_name=simple-http-server
+container_name=$image_name
+dockerfile_dir=~/devenv/dockerfiles/simple-http-server
+
+(cd $dockerfile_dir && docker build -t $image_name .)
+dir2pi $package_dir
+docker rm -f $container_name 2>/dev/null
+echo "Starting local PyPi server: http://$(docker-machine ip $DOCKER_MACHINE_NAME):$port"
+docker run -p $port:80 --rm --name $container_name -v $package_dir:/srv simple-http-server

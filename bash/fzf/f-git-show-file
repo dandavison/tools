@@ -1,0 +1,10 @@
+#!/bin/bash
+commit=$(
+    git log --stat --color=always "$@" |
+        delta |
+        fzf |
+        awk '{print $2}'
+)
+[[ -n "$commit" ]] || exit
+file=$(git show --name-only --pretty=format: "$commit" | fzf)
+git show "$commit" "$file"

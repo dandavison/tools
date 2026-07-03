@@ -1,0 +1,7 @@
+#!/bin/bash
+git branch-by-date |
+    awk '{print $1}' |
+    grep '^z-' |
+    while read b; do
+        git branch -D $b 2>/dev/null
+    done

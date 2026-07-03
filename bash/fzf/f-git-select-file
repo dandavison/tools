@@ -1,0 +1,4 @@
+#!/bin/bash
+commit="${1:-HEAD}"
+[[ ! -t 0 ]] && read commit
+git show --name-only --pretty=format: "$commit" | fzf --sync

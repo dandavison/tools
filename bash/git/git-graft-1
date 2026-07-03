@@ -1,0 +1,6 @@
+#!/bin/bash
+stock=$1
+scion=$2
+git checkout -b "z-temp-graft-branch"
+git rebase --onto $stock $scion "z-temp-graft-branch"
+echo "Done; on a temp branch. You probably want to use reset --hard to make your working branch point at this temp branch's HEAD"

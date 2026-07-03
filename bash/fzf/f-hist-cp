@@ -1,0 +1,2 @@
+#!/bin/bash
+atuin history list | fzf --no-sort --exact | tr -d "\n" | pbcopy

@@ -1,0 +1,2 @@
+#!/bin/bash
+bat --style header,grid $(which "$1")

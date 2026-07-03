@@ -1,0 +1,3 @@
+#!/bin/bash
+git config user.name "Dan Davison"
+git config user.email "dan.davison@temporal.io"

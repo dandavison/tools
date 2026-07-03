@@ -1,0 +1,2 @@
+#!/bin/bash
+touch $1 && git add $1 && emacsclient -n $1

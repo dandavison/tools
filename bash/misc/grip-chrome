@@ -1,0 +1,3 @@
+#!/bin/bash
+tmpfile=$(mktemp)
+grip --export $1 $tmpfile >/dev/null 2>&1 && chrome $tmpfile

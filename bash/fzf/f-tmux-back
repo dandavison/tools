@@ -1,0 +1,2 @@
+#!/bin/bash
+f-tmux "$(cat /tmp/tmux-last-window)"

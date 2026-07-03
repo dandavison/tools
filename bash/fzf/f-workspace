@@ -1,0 +1,2 @@
+#!/bin/bash
+echo temporal nexus ai | tr ' ' '\n' | fzf >/tmp/ws

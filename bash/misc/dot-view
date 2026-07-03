@@ -1,0 +1,5 @@
+#!/bin/bash
+file=$(mktemp).svg
+dot -T svg -o $file <$1
+echo $file
+open -a "/Applications/Google Chrome.app" $file

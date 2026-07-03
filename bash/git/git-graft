@@ -1,0 +1,8 @@
+#!/bin/bash
+new_commits=$1
+original_branch=$(git rev-parse --abbrev-ref HEAD)
+git checkout -b "z-temp-graft-branch"
+git rebase --onto $original_branch $new_commits $(git rev-parse --abbrev-ref HEAD)
+echo "Done; on temp branch $(git rev-parse --abbrev-ref HEAD). "
+echo "You probably want to use reset --hard to make your original branch "
+echo "$original_branch point at this temp branch's HEAD."

@@ -1,0 +1,7 @@
+#!/bin/bash
+if test -t 1; then
+    command fd --color=always --hyperlink=always "$@" |
+        rg -r $'\e]8;;http://wormhole:7117/file$1?land-in=editor' $'^\e]8;;file://'$(hostname)'(.*)'
+else
+    command fd "$@"
+fi

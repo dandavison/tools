@@ -1,0 +1,2 @@
+#!/bin/bash
+git-branch-by-date | rg -v '^z-' | fzf --sync | awk '{print $1}'

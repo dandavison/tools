@@ -1,0 +1,17 @@
+#!/bin/bash
+selected="$(
+    git stash list --date=relative |
+        sed -E 's/^stash@//' |
+        sed -E 's/^(\{[^}]+\}): /\1|/' |
+        nl -v 0 -w 1 -s '|' |
+        awk -F'|' '{
+        idx = $1
+        time = $2
+        desc = $3
+        gsub(/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}[ ]?/, "", desc)
+        printf "%s|%s: %s\n", idx, time, desc
+    }' |
+        fzf --with-nth 2.. --delimiter '|' |
+        cut -d'|' -f1
+)"
+[ -n "$selected" ] && echo -n "stash@{$selected}"

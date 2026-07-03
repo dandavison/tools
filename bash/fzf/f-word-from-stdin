@@ -1,0 +1,5 @@
+#!/bin/bash
+rg -o '[[:alnum:]_.,/~@#+=:-]{4,}' |
+    rg '[[:alpha:]]' |
+    LC_ALL=C sort -u |
+    fzf

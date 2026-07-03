@@ -1,0 +1,2 @@
+#!/bin/bash
+(fd -t f '\.py$' . | while read f; do bat --decorations always --paging=never "$f"; done)

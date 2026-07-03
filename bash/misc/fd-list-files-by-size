@@ -1,0 +1,2 @@
+#!/bin/bash
+command fd . "$@" --type f --exec du -ah {} | sort -rh

@@ -1,0 +1,3 @@
+#!/bin/bash
+file="$1"
+echo | fzf --print-query --preview "jq '{q}' < '$file'" --preview-window "top:95%"

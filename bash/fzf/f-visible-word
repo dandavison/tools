@@ -1,0 +1,2 @@
+#!/bin/bash
+f-word-from-stdin <<<"$(tmux capture-pane -p)"

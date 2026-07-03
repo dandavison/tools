@@ -1,0 +1,4 @@
+#!/bin/bash
+opts=()
+[[ ! -t 0 ]] && opts=(--stdin)
+git log --color=always --oneline --decorate "${opts[@]}" "$@" | fzf --sync | awk '{print $1}'

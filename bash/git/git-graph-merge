@@ -1,0 +1,4 @@
+#!/bin/bash
+merge_commit=$1
+git log --oneline --graph \
+    $(git merge-base $merge_commit^1 $merge_commit^2)..$merge_commit

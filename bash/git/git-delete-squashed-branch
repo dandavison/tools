@@ -1,0 +1,7 @@
+#!/bin/bash
+branch=$1
+main=master
+git checkout $branch &&
+    git rebase $main &&
+    git checkout $main &&
+    git branch -d $branch

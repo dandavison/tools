@@ -1,0 +1,4 @@
+#!/bin/bash
+find ~/src -maxdepth 1 -type d | egrep -v '(3p|counsyl)' | while read d; do
+    (cd $d && [ -d .git ] && git grep $@)
+done

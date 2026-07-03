@@ -1,0 +1,6 @@
+#!/bin/bash
+(osqueryi --list --separator ',') <<EOF
+SELECT p.pid, p.name, p.cwd
+FROM processes AS p
+ORDER BY p.cmdline;
+EOF

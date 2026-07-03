@@ -1,0 +1,2 @@
+#!/bin/bash
+git ls-files | xargs -P 0 sed --follow-symlinks -i -E "$@"

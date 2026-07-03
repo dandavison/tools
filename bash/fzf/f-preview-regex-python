@@ -1,0 +1,7 @@
+#!/bin/bash
+input="$1"
+echo | fzf --print-query --preview-window up --preview "python -c \"
+import re
+print('Input: $input\n')
+m = re.match({q}, '$input')
+print(m.groups() if m else '<no match>')\""

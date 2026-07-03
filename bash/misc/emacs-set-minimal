@@ -1,0 +1,3 @@
+#!/bin/bash
+rm -f ~/.emacs
+ln -s ~/devenv/emacs-config/emacs-minimal.el ~/.emacs

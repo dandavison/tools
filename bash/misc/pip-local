@@ -1,0 +1,4 @@
+#!/bin/bash
+PIP_INDEX_URL="http://$(docker-machine ip $DOCKER_MACHINE_NAME):5555/simple/" \
+PIP_TRUSTED_HOST=$(docker-machine ip $DOCKER_MACHINE_NAME) \
+    pip $@
