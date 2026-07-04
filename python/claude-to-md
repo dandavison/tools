@@ -12,8 +12,8 @@
 # paragraphs. Output joins each paragraph onto one line, rendering user turns
 # as blockquotes and assistant turns as plain paragraphs.
 #
-# With a tty stdin, reads from the system clipboard instead:
-#   claude-to-md | cp
+# By default reads from and writes to the system clipboard; a piped stdin or
+# stdout overrides the respective side.
 
 import subprocess
 import sys
@@ -23,7 +23,11 @@ USER, ASSISTANT = "❯", "⏺"
 
 def main() -> None:
     text = sys.stdin.read() if not sys.stdin.isatty() else pbpaste()
-    print(render(parse_turns(text)), end="")
+    output = render(parse_turns(text))
+    if sys.stdout.isatty():
+        pbcopy(output)
+    else:
+        print(output, end="")
 
 
 def parse_turns(text: str) -> list[tuple[str, list[str]]]:
@@ -70,6 +74,10 @@ def pbpaste() -> str:
     return subprocess.run(
         ["pbpaste"], capture_output=True, text=True, check=True
     ).stdout
+
+
+def pbcopy(text: str) -> None:
+    subprocess.run(["pbcopy"], input=text, text=True, check=True)
 
 
 if __name__ == "__main__":
