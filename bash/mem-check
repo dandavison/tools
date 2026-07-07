@@ -1,0 +1,76 @@
+#!/bin/bash
+#
+# mem-check
+#
+# Prints the precise percentage of physical memory currently used, with the
+# raw page counts it's computed from. If that percentage is at or above
+# --threshold, also prints the top RSS consumers (grouped by app name, since
+# e.g. Chrome and Slack fork many helper processes that are otherwise hard to
+# add up).
+#
+# Usage: mem-check [-t threshold_pct] [-n num_processes]
+#   -t   used% at/above which per-process detail is shown (default 80)
+#   -n   number of processes to show when over threshold (default 15)
+
+set -euo pipefail
+
+threshold=80
+n=15
+while getopts "t:n:" opt; do
+    case "$opt" in
+        t) threshold="$OPTARG" ;;
+        n) n="$OPTARG" ;;
+    esac
+done
+
+vm_stat_out="$(vm_stat)"
+page_size=$(echo "$vm_stat_out" | head -1 | grep -o '[0-9]*' )
+page_count() { echo "$vm_stat_out" | awk -F'[: .]+' -v k="$1" '$0 ~ "^"k"[: ]" {print $(NF-1)}'; }
+
+free=$(page_count "Pages free")
+speculative=$(page_count "Pages speculative")
+active=$(page_count "Pages active")
+inactive=$(page_count "Pages inactive")
+wired=$(page_count "Pages wired down")
+compressed=$(page_count "Pages occupied by compressor")
+
+total=$(($(sysctl -n hw.memsize) / page_size))
+available=$((free + speculative))
+used=$((total - available))
+
+used_pct=$(awk -v u="$used" -v t="$total" 'BEGIN { printf "%.1f", 100 * u / t }')
+total_gb=$(awk -v p="$page_size" -v t="$total" 'BEGIN { printf "%.1f", p * t / 1024/1024/1024 }')
+used_gb=$(awk -v p="$page_size" -v u="$used" 'BEGIN { printf "%.1f", p * u / 1024/1024/1024 }')
+
+echo "Memory used: ${used_pct}% (${used_gb} GB of ${total_gb} GB)"
+echo
+echo "Definition: used = total - free - speculative"
+echo "  (free/speculative pages are immediately reusable with no I/O;"
+echo "   active/inactive/wired/compressed pages all count as used)"
+echo
+echo "Page size: ${page_size} bytes. Page counts:"
+printf "  %-12s %10d\n" total "$total" free "$free" speculative "$speculative" \
+    active "$active" inactive "$inactive" wired "$wired" compressed "$compressed"
+
+is_bad=$(awk -v u="$used_pct" -v t="$threshold" 'BEGIN { print (u >= t) ? 1 : 0 }')
+if [ "$is_bad" = 1 ]; then
+    echo
+    echo "used% >= threshold (${threshold}%) -- top $n processes by memory (RSS), grouped by app:"
+    ps -A -o rss,comm |
+        tail -n +2 |
+        awk '{
+            rss = $1
+            name = $2
+            for (i = 3; i <= NF; i++) name = name " " $i
+            sub(/^.*\//, "", name)
+            sub(/ \(Renderer\)$/, "", name)
+            sub(/ Helper.*/, "", name)
+            total[name] += rss
+        }
+        END {
+            for (name in total) print total[name], name
+        }' |
+        sort -rn |
+        head -n "$n" |
+        awk '{ printf "%8.0f MB  %s\n", $1/1024, substr($0, index($0,$2)) }'
+fi
