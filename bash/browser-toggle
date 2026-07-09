@@ -11,4 +11,4 @@ p.write_bytes(plistlib.dumps(d, fmt=plistlib.FMT_BINARY))
 d = plistlib.loads(p.read_bytes())
 print(next(h["LSHandlerRoleAll"] for h in d["LSHandlers"] if h.get("LSHandlerURLScheme") == "https"))
 EOF
-killall lsd
+killall lsd 2>/dev/null || :
