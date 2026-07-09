@@ -7,18 +7,23 @@
 #
 # Review a GitHub PR by driving `claude` as a subprocess.
 #
+# The PR metadata and full diff are fetched deterministically with `gh` and
+# inlined into the prompt, so claude reviews exactly what we give it and needs
+# no tools of its own. Its output is streamed to stdout as it is produced.
+#
 # Usage:
 #     temporal-review-pr <github-url | pr-number>   # review the PR
-#     temporal-review-pr --show-prompt              # print the review prompt
+#     temporal-review-pr --show-prompt [<pr>]       # print the prompt
 #     temporal-review-pr --model <model> <pr>       # override the model
 
 import argparse
+import json
 import subprocess
 import sys
 
 DEFAULT_MODEL = "opus"
 
-PROMPT = "Review this PR."
+INSTRUCTIONS = "Review this PR."
 
 
 def main() -> int:
@@ -33,20 +38,91 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.show_prompt:
-        print(PROMPT)
+        print(build_prompt(args.pr) if args.pr else INSTRUCTIONS)
         return 0
 
     if not args.pr:
         parser.error("a GitHub PR URL or number is required")
 
-    return review(args.pr, args.model)
+    return review(build_prompt(args.pr), args.model)
 
 
-def review(pr: str, model: str) -> int:
-    message = f"{PROMPT}\n\nPR: {pr}"
-    return subprocess.run(
-        ["claude", "--model", model, "--allowedTools", "Bash(gh:*)", "-p", message]
-    ).returncode
+def build_prompt(pr: str) -> str:
+    meta = pr_metadata(pr)
+    header = "\n".join(
+        [
+            f"Title: {meta['title']}",
+            f"URL: {meta['url']}",
+            f"Author: {meta['author'].get('login', '')}",
+        ]
+    )
+    return "\n".join(
+        [
+            INSTRUCTIONS,
+            "",
+            header,
+            "",
+            "Description:",
+            meta["body"] or "(none)",
+            "",
+            "Diff:",
+            "```diff",
+            pr_diff(pr),
+            "```",
+        ]
+    )
+
+
+def pr_metadata(pr: str) -> dict:
+    out = gh("pr", "view", pr, "--json", "title,url,author,body")
+    return json.loads(out)
+
+
+def pr_diff(pr: str) -> str:
+    return gh("pr", "diff", pr)
+
+
+def gh(*args: str) -> str:
+    result = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"gh {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def review(prompt: str, model: str) -> int:
+    proc = subprocess.Popen(
+        [
+            "claude",
+            "--model",
+            model,
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            prompt,
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        emit(line)
+    return proc.wait()
+
+
+def emit(line: str) -> None:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if event.get("type") != "stream_event":
+        return
+    inner = event.get("event", {})
+    if inner.get("type") == "content_block_delta":
+        delta = inner.get("delta", {})
+        if delta.get("type") == "text_delta":
+            print(delta.get("text", ""), end="", flush=True)
 
 
 if __name__ == "__main__":
