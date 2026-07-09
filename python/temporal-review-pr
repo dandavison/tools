@@ -18,6 +18,7 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 
@@ -44,7 +45,40 @@ def main() -> int:
     if not args.pr:
         parser.error("a GitHub PR URL or number is required")
 
+    validate(args.pr)
     return review(build_prompt(args.pr), args.model)
+
+
+def validate(pr: str) -> None:
+    require_clean_repo()
+    repo = pr_url_repo(pr)
+    if repo:
+        require_local_clone(repo)
+
+
+def require_clean_repo() -> None:
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        sys.exit("error: not inside a git repository")
+    if subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True
+    ).stdout.strip():
+        sys.exit("error: working tree has uncommitted changes")
+
+
+def require_local_clone(repo: str) -> None:
+    current = gh(
+        "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"
+    ).strip()
+    if current.lower() != repo.lower():
+        sys.exit(f"error: current repo is {current}, not the PR's repo {repo}")
+
+
+def pr_url_repo(pr: str) -> str | None:
+    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/pull/\d+", pr)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
 def build_prompt(pr: str) -> str:
