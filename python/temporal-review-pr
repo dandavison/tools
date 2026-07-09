@@ -1,0 +1,53 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+#
+# Review a GitHub PR by driving `claude` as a subprocess.
+#
+# Usage:
+#     temporal-review-pr <github-url | pr-number>   # review the PR
+#     temporal-review-pr --show-prompt              # print the review prompt
+#     temporal-review-pr --model <model> <pr>       # override the model
+
+import argparse
+import subprocess
+import sys
+
+DEFAULT_MODEL = "opus"
+
+PROMPT = "Review this PR."
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="temporal-review-pr", description="Review a GitHub PR using claude."
+    )
+    parser.add_argument("pr", nargs="?", help="GitHub PR URL or number")
+    parser.add_argument(
+        "--show-prompt", action="store_true", help="print the prompt and exit"
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Anthropic model to use")
+    args = parser.parse_args()
+
+    if args.show_prompt:
+        print(PROMPT)
+        return 0
+
+    if not args.pr:
+        parser.error("a GitHub PR URL or number is required")
+
+    return review(args.pr, args.model)
+
+
+def review(pr: str, model: str) -> int:
+    message = f"{PROMPT}\n\nPR: {pr}"
+    return subprocess.run(
+        ["claude", "--model", model, "--allowedTools", "Bash(gh:*)", "-p", message]
+    ).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
