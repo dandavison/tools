@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+python3 - <<'EOF'
+import plistlib, pathlib
+p = pathlib.Path.home() / "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
+island, finicky = "io.island.island", "se.johnste.finicky"
+d = plistlib.loads(p.read_bytes())
+for h in d["LSHandlers"]:
+    if h.get("LSHandlerURLScheme") in ("http", "https"):
+        h["LSHandlerRoleAll"] = finicky if h["LSHandlerRoleAll"].lower() == island else island
+p.write_bytes(plistlib.dumps(d, fmt=plistlib.FMT_BINARY))
+d = plistlib.loads(p.read_bytes())
+print(next(h["LSHandlerRoleAll"] for h in d["LSHandlers"] if h.get("LSHandlerURLScheme") == "https"))
+EOF
+killall lsd
