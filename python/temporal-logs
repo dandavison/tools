@@ -74,20 +74,22 @@ Parse then filter non-indexed fields (most of our logs are JSON):
   {...} | logfmt                    for key=value style logs
   Drop unparseable lines:  | json | __error__="" (keep parsed) or __error__!="JSONParserErr"
 
-Metric queries (use --instant for a single value, or --step for a range):
-  count_over_time({...}[5m])                          count matching lines
-  sum(count_over_time({...}[5m])) by (k8s_pod)        grouped counts
+Metric queries wrap a log query in a range aggregation. The range selector `[5m]`
+is part of the LogQL and is REQUIRED inside count_over_time/rate/etc — the CLI does
+not add it for you. Pass --instant to evaluate once (a single value per group), or
+--step 1m for a time series across the window.
+  count_over_time({...}[5m])                            count matching lines
+  sum(count_over_time({...}[5m])) by (k8s_pod)          grouped counts
   topk(10, sum(count_over_time({...}[1h])) by (error))  top-10 by a field
-  When you pass --instant/--step the CLI supplies the range, so write the metric
-  function WITHOUT the trailing [range]: `sum(count_over_time({...})) by (k8s_pod)`.
 
-Examples
+Examples (cluster ids like s-aw031/p-fpkzu are prod; discover with `labels cluster`)
 --------
-  temporal-logs query '{cluster="s-cd015", k8s_namespace="temporal", k8s_container="history"}'
-  temporal-logs query '{cluster="s-cd015", k8s_container="history"} |= `"level":"error"`' --since 30m
-  temporal-logs query '{cluster="s-cd015"} | json | logging_call_at=`task_fetcher.go:434`' -o jsonl
-  temporal-logs query 'topk(10, sum(count_over_time({cluster="s-cd015"} |= "error" | json | level="error")) by (error))' --instant --since 1h
-  temporal-logs query '{cluster="s-cd015"} |= "shard"' --env test --from 2025-08-10T15:03:59Z --to 2025-08-10T19:04:16Z
+  temporal-logs query '{cluster="s-aw031", k8s_namespace="temporal", k8s_container="history"}' --since 30m
+  temporal-logs query '{cluster="s-aw031", k8s_container="history"} |= `"level":"error"`' --since 30m
+  temporal-logs query '{cluster="newton"} | json | logging_call_at=`task_fetcher.go:434`' -o jsonl
+  temporal-logs query 'topk(10, sum(count_over_time({cluster=~"p-.+"}[5m])) by (cluster))' --instant --since 5m
+  temporal-logs query 'topk(10, sum(count_over_time({cluster="s-aw031"} |= "error" | json | level="error" [1h])) by (error))' --instant --since 1h
+  temporal-logs query '{cluster="s-wlkr-a-aws395"} |= "shard"' --env test --from 2025-08-10T15:03:59Z --to 2025-08-10T19:04:16Z
 
 Cost note: queries touch a lot of data. Always narrow the selector as much as you
 can (cluster + namespace + container at minimum) and keep the time window tight;

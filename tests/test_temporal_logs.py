@@ -143,14 +143,17 @@ class TestCli:
         assert r.returncode == 0
         assert "LogQL" in r.stdout or "query" in r.stdout
 
-    def test_no_forward_errors_cleanly(self):
-        r = subprocess.run(
-            [str(SCRIPT_PATH), "query", '{cluster="x"}', "--no-forward"],
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 1
-        assert "no Loki" in r.stderr
+
+class TestEnsureLoki:
+    def test_addr_overrides_forward(self):
+        args = _ns(addr="http://example:3100/", env="prod", no_forward=False)
+        assert tl.ensure_loki(args) == "http://example:3100"
+
+    def test_no_forward_errors_when_unreachable(self, monkeypatch):
+        monkeypatch.setattr(tl, "loki_ready", lambda addr: False)
+        args = _ns(addr=None, env="prod", no_forward=True)
+        with pytest.raises(tl.QueryError, match="no Loki"):
+            tl.ensure_loki(args)
 
 
 def _ns(**kw):
