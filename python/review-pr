@@ -8,8 +8,11 @@
 # Review a GitHub PR by driving `claude` as a subprocess.
 #
 # The PR metadata and full diff are fetched deterministically with `gh` and
-# inlined into the prompt, so claude reviews exactly what we give it and needs
-# no tools of its own. Its output is streamed to stdout as it is produced.
+# inlined into the prompt, so claude always sees the whole diff. claude is run
+# with --safe-mode (no CLAUDE.md/AGENTS.md, skills, MCP, hooks, or plugins) and
+# a read-only toolset (Read/Grep/Glob, so no skills and no mutation), letting it
+# explore the local checkout for context while staying reproducible across team
+# members regardless of their local config. Output is streamed to stdout.
 #
 # Usage:
 #     review-pr <github-url | pr-number>   # review the PR
@@ -131,6 +134,9 @@ def review(prompt: str, model: str) -> int:
             "claude",
             "--model",
             model,
+            "--safe-mode",
+            "--tools",
+            "Read,Grep,Glob",
             "--print",
             "--output-format",
             "stream-json",
