@@ -15,9 +15,9 @@
 # members regardless of their local config. Output is streamed to stdout.
 #
 # Usage:
-#     review-pr <github-url | pr-number>   # review the PR
-#     review-pr --show-prompt [<pr>]       # print the prompt
-#     review-pr --model <model> <pr>       # override the model
+#     pr-review <github-url | pr-number>   # review the PR
+#     pr-review --show-prompt [<pr>]       # print the prompt
+#     pr-review --model <model> <pr>       # override the model
 
 import argparse
 import json
@@ -28,9 +28,9 @@ import sys
 DEFAULT_MODEL = "opus"
 
 INSTRUCTIONS = """
-Output a review of this PR as follows.
-Where you are instructed to output text, output a small number of bulletpoints using complete sentences.
-When you exit, explain why.
+Output a review of this PR as described below.
+Where you are instructed to output text, output a small number of bulletpoints, each comprising one sentence.
+When you exit due to a problem, explain why.
 
 - Ensure that you are in a directory containing a clone of the PR's repo, with the commit corresponding to the PR checked out. Exit if not.
 
@@ -43,57 +43,17 @@ When you exit, explain why.
 - Study the test coverage added.
   Describe any important aspects of the PR's intention that are not tested.
   Describe any test that is not achieving what it intends to.
-  Describe any test that is a false negative in the sense that, were the corresponding part of the implementation reverted, the test would nevertheless continue to pass.
+  Describe any test that is a false negative in the sense that, were the corresponding part of the implementation to be reverted, the test would nevertheless continue to pass.
 
 - Describe all correctness bugs.
 
 - Describe any other major flaws you perceive in the PR.
-
-
- 1. Make sure you understand the purpose of the repository and have an appropriate amount of context.
-
- 2. Try to create a pending Review using the instructions above.
-
- 3. Use gh pr diff to read the full diff. Then read all changed files completely for full context — understand the surrounding code, not just the diff lines.
-
- 4. Do you understand the intent of the PR? Is the intent what it should be? Is it basically doing what it intends?
-
- 5. Review the parts of the diff that change documentation and docstrings. Comment on individual lines as you see fit.
-
- 6. Review the parts of the diff that change test coverage, commenting on individual lines as you see fit. In general, a test suite should be passing if and only if the implementation defines correct behavior
-    of the feature. Consider the following as possible reasons to comment:
-
-    • Are there any important ways that the behavior of the feature could be incorrect without resulting in a failing test? If so then there is missing test coverage.
-    • Could some essential lines of code be removed from the implementation without resulting in a failing test? If so then there is missing test coverage.
-    • Are all tests really testing what they purport to? Or are they in fact testing fake/mock code that was put in place for the purposes of testing?
-    • In general, prefer "end-to-end" / "integration" / "functional" tests. "Unit" tests are sometimes appropriate for testing detailed logic, but be skeptical of them, especially when they employ mocking
-      techniques.
-
- 7. Review error messages, commenting on individual lines as you see fit. These should be concise, well-written, and should instruct the user both what went wrong and how to address it, while avoiding
-    verbosity. Consider the following as possible reasons to comment:
-
-    • Are there any ways in which the feature could be used wrongly without resulting in an appropriate error message?
-
- 8. Review the actual implementation. Consider the following as possible reasons to comment:
-
-    • For each area implemented, can you find related implementation in the repository? If so, are the two consistent? Can the implementation being reviewed benefit from the existing code? Or are you aware of
-      canonical or well-respected implementations of something very similar outside the current repository? If it's a very helpful comparison, make it.
-    • Is the code being reviewed appropriately benefiting from/using existing code?
-    • The code should be clean, and should use more or less the minimal lines of code possible while remaining clear and idiomatic.
-    • Function/variable/class names should be essentially perfect: tastefully chosen to maximize comprehension while conforming to convention. Where possible, explanation of code should be done via
-      well-chosen function/variable/class names, rather than comments.
-    • Any performance or security concerns?
-    • Is the code in the right place?
-
- 9. Set the review body to an overall comment regarding the PR. Comment on whether you think what it is trying to do is what it should be trying to do. Comment on the extent to which it has achieved those two
-    things: what more is needed? If there are any serious problems with the PR, or it appears to be going in an inappropriate direction then say so. If there is anything unusually good about the PR then say so, but
-    do this only in exceptional cases.
 """
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="review-pr", description="Review a GitHub PR using claude."
+        prog="pr-review", description="Review a GitHub PR using claude."
     )
     parser.add_argument("pr", nargs="?", help="GitHub PR URL or number")
     parser.add_argument(
