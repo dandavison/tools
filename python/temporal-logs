@@ -271,7 +271,7 @@ def cmd_port_forward(args: argparse.Namespace) -> int:
         f"forwarding {args.env} ({cell}) {SERVICE} -> http://localhost:{port} (ctrl-c to stop)",
         file=sys.stderr,
     )
-    require_omni()
+    require_ct()
     return subprocess.call(cmd)
 
 
@@ -442,7 +442,7 @@ def wait_ready(addr: str, timeout: float) -> bool:
 
 def start_port_forward(env: str, port: int) -> None:
     cell = ENVIRONMENTS[env]["cell"]
-    require_omni()
+    require_ct()
     print(
         f"starting port-forward to {env} Loki ({cell}) on :{port} ...", file=sys.stderr
     )
@@ -456,7 +456,7 @@ def start_port_forward(env: str, port: int) -> None:
 
 def port_forward_cmd(cell: str, port: int) -> list[str]:
     return [
-        "omni",
+        "ct",
         "kubectl",
         "--context",
         cell,
@@ -468,10 +468,10 @@ def port_forward_cmd(cell: str, port: int) -> list[str]:
     ]
 
 
-def require_omni() -> None:
-    if shutil.which("omni") is None:
+def require_ct() -> None:
+    if shutil.which("ct") is None:
         raise QueryError(
-            "omni not found on PATH; cannot establish the Loki port-forward.\n"
+            "ct not found on PATH; cannot establish the Loki port-forward.\n"
             "  Start one manually in another terminal (prefix with `!` in a Claude session):\n"
             f"    {' '.join(port_forward_cmd('o-uswe2', 3100))}\n"
             "  then re-run with --addr http://localhost:3100 (or set LOKI_ADDR)."

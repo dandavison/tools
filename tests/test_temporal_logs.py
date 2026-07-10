@@ -133,7 +133,7 @@ class TestPortForwardCmd:
         assert tl.ENVIRONMENTS["prod"]["cell"] == "o-uswe2"
         assert tl.ENVIRONMENTS["test"]["cell"] == "o-nj99p"
         cmd = tl.port_forward_cmd("o-uswe2", 3100)
-        assert cmd[:3] == ["omni", "kubectl", "--context"]
+        assert cmd[:3] == ["ct", "kubectl", "--context"]
         assert "service/loki-query-frontend" in cmd
 
 
