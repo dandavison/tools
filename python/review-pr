@@ -63,7 +63,9 @@ def require_clean_repo() -> None:
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         sys.exit("error: not inside a git repository")
     if subprocess.run(
-        ["git", "status", "--porcelain"], capture_output=True, text=True
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
     ).stdout.strip():
         sys.exit("error: working tree has uncommitted changes")
 
