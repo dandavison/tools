@@ -12,9 +12,9 @@
 # no tools of its own. Its output is streamed to stdout as it is produced.
 #
 # Usage:
-#     temporal-review-pr <github-url | pr-number>   # review the PR
-#     temporal-review-pr --show-prompt [<pr>]       # print the prompt
-#     temporal-review-pr --model <model> <pr>       # override the model
+#     review-pr <github-url | pr-number>   # review the PR
+#     review-pr --show-prompt [<pr>]       # print the prompt
+#     review-pr --model <model> <pr>       # override the model
 
 import argparse
 import json
@@ -29,7 +29,7 @@ INSTRUCTIONS = "Review this PR."
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="temporal-review-pr", description="Review a GitHub PR using claude."
+        prog="review-pr", description="Review a GitHub PR using claude."
     )
     parser.add_argument("pr", nargs="?", help="GitHub PR URL or number")
     parser.add_argument(
