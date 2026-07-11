@@ -86,10 +86,13 @@ Examples (cluster ids like s-aw031/p-fpkzu are prod; discover with `labels clust
 --------
   temporal-logs query '{cluster="s-aw031", k8s_namespace="temporal", k8s_container="history"}' --since 30m
   temporal-logs query '{cluster="s-aw031", k8s_container="history"} |= `"level":"error"`' --since 30m
-  temporal-logs query '{cluster="newton"} | json | logging_call_at=`task_fetcher.go:434`' -o jsonl
+  temporal-logs query '{cluster="s-aw031", k8s_container="history"} | json | logging_call_at=~`.*transaction_impl.go.*`' --since 30m -o jsonl
   temporal-logs query 'topk(10, sum(count_over_time({cluster=~"p-.+"}[5m])) by (cluster))' --instant --since 5m
   temporal-logs query 'topk(10, sum(count_over_time({cluster="s-aw031"} |= "error" | json | level="error" [1h])) by (error))' --instant --since 1h
-  temporal-logs query '{cluster="s-wlkr-a-aws395"} |= "shard"' --env test --from 2025-08-10T15:03:59Z --to 2025-08-10T19:04:16Z
+
+Add `--env test` to query the test Loki instead of prod. For an absolute window, replace
+`--since` with `--from`/`--to` ISO8601 timestamps (within Loki's retention), e.g.
+`--from 2026-07-09T15:00:00Z --to 2026-07-09T16:00:00Z`.
 
 Cost note: queries touch a lot of data. Always narrow the selector as much as you
 can (cluster + namespace + container at minimum) and keep the time window tight;
