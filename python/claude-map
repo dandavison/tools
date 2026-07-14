@@ -7,20 +7,22 @@ The targets are the N most-recently-modified transcripts under
 context, and the reply is printed under a header showing the session id (usable
 with `claude -r <id>`) and its name. Sessions are processed concurrently.
 
-By default the exchange is appended to each session's history. With -n the
-sessions are resumed with --no-session-persistence, so their transcripts are
-left untouched.
+Defaults are chosen so mapping a prompt is side-effect-free:
+  * read-only: the mutating tools (Bash, Edit, Write, ...) are disallowed, so a
+    session can still read the codebase (Read/Grep/Glob) but cannot act on it.
+    Pass --allow-writes to restore the full toolset.
+  * no persistence: --no-session-persistence is used, so histories are left
+    untouched. Pass --session-persistence to append the exchange instead.
 
 MCP servers are disabled (--strict-mcp-config): resuming otherwise stalls while
-interactively-authenticated servers reconnect. The resumed session still has
-its ordinary Read/Write/Edit/Bash tools, so a prompt may cause it to act, not
-merely answer.
+interactively-authenticated servers reconnect.
 
-Responses are clipped to one terminal-width line by default; -t N shows N
-lines and -t 0 the full text.
+Responses are clipped to one terminal-width line by default; -t N shows N lines
+and -t 0 the full text.
 
 Usage:
-    claude-map [-n] [-j JOBS] [-t N] [--model MODEL] N "prompt"
+    claude-map [--session-persistence] [--allow-writes] [-j JOBS] [-t N]
+               [--model MODEL] N "prompt"
 """
 
 import argparse
@@ -36,6 +38,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 BOLD, DIM, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[32m", "\033[31m", "\033[0m"
+
+READ_ONLY_DISALLOWED = ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]
 
 
 def slug_for_cwd() -> str:
@@ -80,20 +84,16 @@ def ask(
     title: str | None,
     prompt: str,
     persist: bool,
+    allow_writes: bool,
     model: str | None,
     timeout: int,
 ) -> Answer:
-    cmd = [
-        "claude",
-        "-p",
-        "--resume",
-        sid,
-        "--strict-mcp-config",
-        "--output-format",
-        "json",
-    ]
+    cmd = ["claude", "-p", "--resume", sid, "--strict-mcp-config"]
+    cmd += ["--output-format", "json"]
     if not persist:
         cmd.append("--no-session-persistence")
+    if not allow_writes:
+        cmd += ["--disallowedTools", *READ_ONLY_DISALLOWED]
     if model:
         cmd += ["--model", model]
     cmd.append(prompt)
@@ -122,15 +122,6 @@ def ask(
     )
 
 
-def render(a: Answer, index: int, total: int, truncate: int, width: int) -> str:
-    mark = f"{GREEN}✓{RESET}" if a.ok else f"{RED}✗{RESET}"
-    cost = f"  {DIM}${a.cost:.4f}{RESET}" if a.cost is not None else ""
-    name = f"  {a.title}" if a.title else ""
-    head = f"{BOLD}━━━ [{index}/{total}] {mark} {a.sid}{RESET}{name}{cost}"
-    hint = f"{DIM}    claude -r {a.sid}{RESET}"
-    return f"{head}\n{hint}\n\n{clip(a.text, truncate, width)}\n"
-
-
 def clip(text: str, truncate: int, width: int) -> str:
     if truncate <= 0:
         return text
@@ -142,6 +133,16 @@ def clip(text: str, truncate: int, width: int) -> str:
     return "\n".join(shown)
 
 
+def render(a: Answer, index: int, total: int, truncate: int, width: int) -> str:
+    mark = f"{GREEN}✓{RESET}" if a.ok else f"{RED}✗{RESET}"
+    cost = f"    {a.cost:.4f} USD" if a.cost is not None else ""
+    title = a.title or "(untitled)"
+    rule = f"{DIM}{'─' * width}{RESET}"
+    head = f"{BOLD}[{index}/{total}]{RESET} {mark} {BOLD}{title}{RESET}"
+    meta = f"{DIM}claude -r {a.sid}{cost}{RESET}"
+    return f"{rule}\n{head}\n{meta}\n\n{clip(a.text, truncate, width)}\n"
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Submit a prompt to the N most recent Claude sessions of this directory."
@@ -149,10 +150,14 @@ def main() -> None:
     p.add_argument("n", type=int, help="number of most-recent sessions to target")
     p.add_argument("prompt", help="prompt to submit to each session")
     p.add_argument(
-        "-n",
-        "--no-session-persistence",
+        "--session-persistence",
         action="store_true",
-        help="do not append the exchange to the sessions' histories",
+        help="append the exchange to each session's history (default: don't)",
+    )
+    p.add_argument(
+        "--allow-writes",
+        action="store_true",
+        help=f"restore the full toolset (default disallows {', '.join(READ_ONLY_DISALLOWED)})",
     )
     p.add_argument("-j", "--jobs", type=int, default=5, help="max concurrent sessions")
     p.add_argument(
@@ -174,8 +179,10 @@ def main() -> None:
     targets = [(stem(f), read_title(f)) for f in files]
     order = {sid: i for i, (sid, _) in enumerate(targets)}
     total = len(targets)
+    mode = "read-write" if args.allow_writes else "read-only"
+    persist = "persisting" if args.session_persistence else "no-persist"
     print(
-        f"{DIM}mapping prompt over {total} session(s)…{RESET}",
+        f"{DIM}mapping over {total} session(s)  ·  {mode}  ·  {persist}{RESET}",
         file=sys.stderr,
         flush=True,
     )
@@ -188,7 +195,8 @@ def main() -> None:
                 sid,
                 title,
                 args.prompt,
-                not args.no_session_persistence,
+                args.session_persistence,
+                args.allow_writes,
                 args.model,
                 args.timeout,
             ): sid
@@ -197,14 +205,16 @@ def main() -> None:
         for fut in as_completed(futs):
             a = fut.result()
             answers.append(a)
+            glyph = f"{GREEN}✓{RESET}" if a.ok else f"{RED}✗{RESET}"
             print(
-                f"{DIM}  done {a.sid} ({len(answers)}/{total}){RESET}",
+                f"{DIM}[{len(answers)}/{total}]{RESET} {glyph} {DIM}{a.sid[:8]}{RESET}",
                 file=sys.stderr,
                 flush=True,
             )
 
     width = shutil.get_terminal_size().columns
     answers.sort(key=lambda a: order[a.sid])
+    print()
     for i, a in enumerate(answers, 1):
         print(render(a, i, total, args.truncate, width))
 
