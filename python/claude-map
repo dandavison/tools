@@ -134,7 +134,7 @@ def main() -> None:
     p.add_argument("prompt", help="prompt to submit to each session")
     p.add_argument(
         "-n",
-        "--no-persist",
+        "--no-session-persistence",
         action="store_true",
         help="do not append the exchange to the sessions' histories",
     )
@@ -164,7 +164,7 @@ def main() -> None:
                 sid,
                 title,
                 args.prompt,
-                not args.no_persist,
+                not args.no_session_persistence,
                 args.model,
                 args.timeout,
             ): sid
