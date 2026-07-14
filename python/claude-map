@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Submit one prompt to the N most recent Claude Code sessions of this directory.
+
+The targets are the N most-recently-modified transcripts under
+~/.claude/projects/<cwd-slug>/. Each is resumed non-interactively
+(`claude -p --resume <id>`), the prompt is answered against that session's full
+context, and the reply is printed under a header showing the session id (usable
+with `claude -r <id>`) and its name. Sessions are processed concurrently.
+
+By default the exchange is appended to each session's history. With -n the
+sessions are resumed with --no-session-persistence, so their transcripts are
+left untouched.
+
+MCP servers are disabled (--strict-mcp-config): resuming otherwise stalls while
+interactively-authenticated servers reconnect. The resumed session still has
+its ordinary Read/Write/Edit/Bash tools, so a prompt may cause it to act, not
+merely answer.
+
+Usage:
+    claude-map [-n] [-j JOBS] [--model MODEL] N "prompt"
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+
+BOLD, DIM, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[32m", "\033[31m", "\033[0m"
+
+
+def slug_for_cwd() -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", os.getcwd())
+
+
+def recent_sessions(slug: str, n: int) -> list[str]:
+    files = glob.glob(os.path.expanduser(f"~/.claude/projects/{slug}/*.jsonl"))
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files[:n]
+
+
+def stem(path: str) -> str:
+    return os.path.basename(path)[:-6]
+
+
+def read_title(path: str) -> str | None:
+    custom = ai = None
+    for line in open(path, errors="ignore"):
+        if '"customTitle"' not in line and '"aiTitle"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        custom = obj.get("customTitle") or custom
+        ai = obj.get("aiTitle") or ai
+    return custom or ai
+
+
+@dataclass
+class Answer:
+    sid: str
+    title: str | None
+    text: str
+    cost: float | None
+    ok: bool
+
+
+def ask(
+    sid: str,
+    title: str | None,
+    prompt: str,
+    persist: bool,
+    model: str | None,
+    timeout: int,
+) -> Answer:
+    cmd = [
+        "claude",
+        "-p",
+        "--resume",
+        sid,
+        "--strict-mcp-config",
+        "--output-format",
+        "json",
+    ]
+    if not persist:
+        cmd.append("--no-session-persistence")
+    if model:
+        cmd += ["--model", model]
+    cmd.append(prompt)
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return Answer(sid, title, f"<timed out after {timeout}s>", None, False)
+    if proc.returncode != 0:
+        return Answer(sid, title, (proc.stderr or proc.stdout).strip(), None, False)
+    try:
+        obj = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return Answer(sid, title, proc.stdout.strip(), None, False)
+    return Answer(
+        sid,
+        title,
+        (obj.get("result") or "").strip(),
+        obj.get("total_cost_usd"),
+        not obj.get("is_error", False),
+    )
+
+
+def render(a: Answer, index: int, total: int) -> str:
+    mark = f"{GREEN}✓{RESET}" if a.ok else f"{RED}✗{RESET}"
+    cost = f"  {DIM}${a.cost:.4f}{RESET}" if a.cost is not None else ""
+    name = f"  {a.title}" if a.title else ""
+    head = f"{BOLD}━━━ [{index}/{total}] {mark} {a.sid}{RESET}{name}{cost}"
+    hint = f"{DIM}    claude -r {a.sid}{RESET}"
+    return f"{head}\n{hint}\n\n{a.text}\n"
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Submit a prompt to the N most recent Claude sessions of this directory."
+    )
+    p.add_argument("n", type=int, help="number of most-recent sessions to target")
+    p.add_argument("prompt", help="prompt to submit to each session")
+    p.add_argument(
+        "-n",
+        "--no-persist",
+        action="store_true",
+        help="do not append the exchange to the sessions' histories",
+    )
+    p.add_argument("-j", "--jobs", type=int, default=5, help="max concurrent sessions")
+    p.add_argument("--timeout", type=int, default=600, metavar="SEC")
+    p.add_argument("--model", help="model to use (alias or full name)")
+    args = p.parse_args()
+
+    files = recent_sessions(slug_for_cwd(), args.n)
+    if not files:
+        sys.exit(f"no Claude sessions found for {os.getcwd()}")
+
+    targets = [(stem(f), read_title(f)) for f in files]
+    order = {sid: i for i, (sid, _) in enumerate(targets)}
+    total = len(targets)
+    print(
+        f"{DIM}mapping prompt over {total} session(s)…{RESET}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    answers: list[Answer] = []
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        futs = {
+            pool.submit(
+                ask,
+                sid,
+                title,
+                args.prompt,
+                not args.no_persist,
+                args.model,
+                args.timeout,
+            ): sid
+            for sid, title in targets
+        }
+        for fut in as_completed(futs):
+            a = fut.result()
+            answers.append(a)
+            print(
+                f"{DIM}  done {a.sid} ({len(answers)}/{total}){RESET}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    answers.sort(key=lambda a: order[a.sid])
+    for i, a in enumerate(answers, 1):
+        print(render(a, i, total))
+
+
+if __name__ == "__main__":
+    main()
