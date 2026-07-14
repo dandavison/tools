@@ -16,8 +16,11 @@ interactively-authenticated servers reconnect. The resumed session still has
 its ordinary Read/Write/Edit/Bash tools, so a prompt may cause it to act, not
 merely answer.
 
+Responses are clipped to one terminal-width line by default; -t N shows N
+lines and -t 0 the full text.
+
 Usage:
-    claude-map [-n] [-j JOBS] [--model MODEL] N "prompt"
+    claude-map [-n] [-j JOBS] [-t N] [--model MODEL] N "prompt"
 """
 
 import argparse
@@ -25,8 +28,10 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -117,13 +122,24 @@ def ask(
     )
 
 
-def render(a: Answer, index: int, total: int) -> str:
+def render(a: Answer, index: int, total: int, truncate: int, width: int) -> str:
     mark = f"{GREEN}✓{RESET}" if a.ok else f"{RED}✗{RESET}"
     cost = f"  {DIM}${a.cost:.4f}{RESET}" if a.cost is not None else ""
     name = f"  {a.title}" if a.title else ""
     head = f"{BOLD}━━━ [{index}/{total}] {mark} {a.sid}{RESET}{name}{cost}"
     hint = f"{DIM}    claude -r {a.sid}{RESET}"
-    return f"{head}\n{hint}\n\n{a.text}\n"
+    return f"{head}\n{hint}\n\n{clip(a.text, truncate, width)}\n"
+
+
+def clip(text: str, truncate: int, width: int) -> str:
+    if truncate <= 0:
+        return text
+    lines = textwrap.wrap(" ".join(text.split()), max(1, width)) or [""]
+    shown, more = lines[:truncate], len(lines) > truncate
+    if more:
+        last = shown[-1]
+        shown[-1] = (last if len(last) < width else last[: width - 1]) + "…"
+    return "\n".join(shown)
 
 
 def main() -> None:
@@ -139,6 +155,14 @@ def main() -> None:
         help="do not append the exchange to the sessions' histories",
     )
     p.add_argument("-j", "--jobs", type=int, default=5, help="max concurrent sessions")
+    p.add_argument(
+        "-t",
+        "--truncate",
+        type=int,
+        default=1,
+        metavar="N",
+        help="max lines per response, clipped to terminal width (<=0: full)",
+    )
     p.add_argument("--timeout", type=int, default=600, metavar="SEC")
     p.add_argument("--model", help="model to use (alias or full name)")
     args = p.parse_args()
@@ -179,9 +203,10 @@ def main() -> None:
                 flush=True,
             )
 
+    width = shutil.get_terminal_size().columns
     answers.sort(key=lambda a: order[a.sid])
     for i, a in enumerate(answers, 1):
-        print(render(a, i, total))
+        print(render(a, i, total, args.truncate, width))
 
 
 if __name__ == "__main__":
