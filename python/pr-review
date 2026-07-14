@@ -10,10 +10,9 @@
 # The PR metadata and full diff are fetched deterministically with `gh` and
 # inlined into the prompt, so claude always sees the whole diff. claude is run
 # with --safe-mode (no CLAUDE.md/AGENTS.md, skills, MCP, hooks, or plugins) and
-# a read-only toolset (Read/Grep/Glob, so no skills and no mutation), letting it
-# explore the local checkout for context while staying reproducible across team
-# members regardless of their local config. The review streams to stdout;
-# claude's thoughts and tool activity stream to stderr.
+# no tools at all, so it reviews purely from the inlined diff: reproducible
+# across team members and with no shell/injection surface. The review streams
+# to stdout; claude's thoughts stream to stderr.
 #
 # Usage:
 #     pr-review <github-url | pr-number>   # review the PR
@@ -35,7 +34,7 @@ When you exit due to a problem, explain the problem.
 
 - Ensure that you are in a directory containing a clone of the PR's repo, with the commit corresponding to the PR checked out. Exit if not.
 
-- Run the tests relevant to this PR. If they do not pass, exit.
+- Use gh to check that tests in CI are passing. If there are any failures that are relevant to these changes, exit.
 
 - Describe what the author is trying to achieve. If you are not confident about this, exit.
 
@@ -160,7 +159,7 @@ def review(prompt: str, model: str) -> int:
             model,
             "--safe-mode",
             "--tools",
-            "Read,Grep,Glob",
+            "",
             "--print",
             "--output-format",
             "stream-json",
@@ -172,50 +171,25 @@ def review(prompt: str, model: str) -> int:
         text=True,
     )
     assert proc.stdout is not None
-    seen: set[str] = set()
     for line in proc.stdout:
-        emit(line, seen)
+        emit(line)
     return proc.wait()
 
 
-# The review text goes to stdout; claude's thoughts and tool activity go to
-# stderr, so redirecting stdout captures a clean review.
-def emit(line: str, seen: set[str]) -> None:
+# The review text goes to stdout; claude's thoughts go to stderr, so
+# redirecting stdout captures a clean review.
+def emit(line: str) -> None:
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
         return
-    kind = event.get("type")
-    if kind == "stream_event":
-        delta = event.get("event", {}).get("delta", {})
-        if delta.get("type") == "text_delta":
-            print(delta.get("text", ""), end="", flush=True)
-        elif delta.get("type") == "thinking_delta":
-            print(delta.get("thinking", ""), end="", file=sys.stderr, flush=True)
-    elif kind == "assistant":
-        for block in event["message"].get("content", []):
-            if block.get("type") == "tool_use" and block["id"] not in seen:
-                seen.add(block["id"])
-                log_tool(block)
-    elif kind == "user":
-        for block in event["message"].get("content", []):
-            if block.get("type") == "tool_result":
-                log_result(block)
-
-
-def log_tool(block: dict) -> None:
-    args = block.get("input", {})
-    detail = args.get("file_path") or args.get("path") or args.get("pattern") or ""
-    print(f"\n→ {block['name']} {detail}".rstrip(), file=sys.stderr, flush=True)
-
-
-def log_result(block: dict) -> None:
-    content = block.get("content", "")
-    if isinstance(content, list):
-        content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-    preview = " ".join(content.split())[:200]
-    if preview:
-        print(f"  {preview}", file=sys.stderr, flush=True)
+    if event.get("type") != "stream_event":
+        return
+    delta = event.get("event", {}).get("delta", {})
+    if delta.get("type") == "text_delta":
+        print(delta.get("text", ""), end="", flush=True)
+    elif delta.get("type") == "thinking_delta":
+        print(delta.get("thinking", ""), end="", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
