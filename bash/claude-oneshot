@@ -6,7 +6,7 @@ set -euo pipefail
 prompt="$(rlwrap cat)"
 
 set +e
-claude -p --output-format stream-json --verbose "$prompt" |
+claude --print --no-session-persistence --output-format stream-json --verbose "$prompt" |
   jq -nj --unbuffered '
       foreach inputs as $e (
         {last: null, out: ""};
@@ -14,7 +14,7 @@ claude -p --output-format stream-json --verbose "$prompt" |
           if $e.type == "assistant" then
             ( $e.message.content[]? |
               if   .type == "text"     then {k: "text", v: .text}
-              elif .type == "tool_use" then {k: "tool", v: .name}
+              elif .type == "tool_use" then {k: "tool", v: (if .name == "Skill" then "Skill(\(.input.skill))" else .name end)}
               else empty end )
           elif $e.type == "result" then
             {k: "result", v: "\($e.subtype), \($e.num_turns) turns, $\($e.total_cost_usd // 0 | .*10000|round/10000)"}
