@@ -1,0 +1,59 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+#
+# Search meeting transcripts, newest meeting first, one hit per file.
+#
+# Transcripts live under ~/src/temporalio/meetings as markdown named
+# `<YYYY-MM-DD> <title>.md`, so the meeting date is encoded in the filename.
+# `rg --sortr path` therefore yields true reverse-chronological order,
+# unlike mtime (which git checkout / sync resets to now).
+#
+# Usage:
+#   rg-meetings PATTERN [extra rg args...]
+#   rg-meetings -i 'conflict polic'
+#   rg-meetings -A2 ReusePolicy        # add context lines
+#
+# Any extra arguments are passed through to rg, so all of rg's flags are available.
+import os
+import shlex
+import sys
+from pathlib import Path
+
+MEETINGS_DIR = Path(
+    os.environ.get("MEETINGS_DIR", Path.home() / "src/temporalio/meetings")
+)
+
+DEFAULTS = ["--sortr", "path", "-m1", "-n", "--no-heading", "-g", "*.md"]
+
+USAGE = (
+    """\
+rg-meetings PATTERN [extra rg args...]
+
+Search meeting transcripts, newest meeting first, one hit per file.
+Extra arguments pass through to rg, so all of rg's flags are available.
+
+  rg-meetings -i 'conflict polic'
+  rg-meetings -A2 ReusePolicy        # add context lines
+
+Searches: %s (override with MEETINGS_DIR)"""
+    % MEETINGS_DIR
+)
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        print(USAGE, file=sys.stderr)
+        return 0
+    cmd = ["rg", *DEFAULTS, *argv, str(MEETINGS_DIR)]
+    os.environ["RGI_PREVIEW_RAW"] = (
+        "1"  # bat (highlight + scroll-to-match), not mdcat rendering
+    )
+    os.execvp("rgi", [shlex.quote(s) for s in cmd])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
