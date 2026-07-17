@@ -1,0 +1,372 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""
+Expand or contract the context window of a code-walkthrough diff.
+
+Reads a walkthrough diff (as produced by the code-walkthrough skill's
+build-walkthrough script -- see ~/.agents/skills/code-walkthrough) on stdin,
+and rewrites every hunk's leading/trailing context to exactly --context N
+lines, emitting the result on stdout.
+
+Contracting just truncates the context already present in the diff.
+Expanding needs more context than the diff currently carries, so those
+extra lines are read directly from the real file on disk: the diff is
+assumed to correspond to HEAD of the repo rooted in the current directory.
+
+A walkthrough hunk looks like:
+
+    @@ -8,6 +6,10 @@
+     L8                              <- ctx_before (real context)
+     L9
+     L10
+    +// ▶ [WALKTHROUGH 1/1]          <- walkthrough comment (synthetic +
+    +// ▶ explanatory prose.          lines injected by build-walkthrough)
+    +ADDED1                          <- core (the actual +/- lines)
+    +ADDED2
+     L11                             <- ctx_after (real context)
+     L12
+     L13
+
+build-walkthrough deliberately prints a *fictitious* new-side hunk-start
+(shifted down by the comment's line count) so that the core lines -- the
+ones the walkthrough is actually about -- carry correct file line numbers;
+only ctx_before's printed numbers are off by that same shift. This script
+undoes that shift arithmetically (see _anchors()) rather than trusting the
+printed numbers, so it works whether the input already has wide context
+(nothing to do) or narrow context (needs real file content spliced in).
+
+No diff algorithm is needed here (difflib etc. produce diffs from two
+sequences; this problem is the opposite -- slicing more/less of an
+*existing* diff's context), so this script is a plain text/line-number
+transform plus direct file reads.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass
+
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*\n?)$")
+COMMENT_MARKER_RE = re.compile(r'^\+\s*(?://|#|--|;;|%|"|<!--|/\*)\s*▶')
+
+
+@dataclass
+class ContentLine:
+    kind: str  # 'ctx', 'add', 'del'
+    text: str
+    bs: str | None = None  # attached "\ No newline at end of file" line, if any
+
+    def render(self) -> str:
+        return self.text + (self.bs or "")
+
+
+@dataclass
+class Hunk:
+    old_start: int
+    new_start: int
+    suffix: str
+    lines: list[ContentLine]
+    path: str | None
+
+
+def render_lines(lines: list[ContentLine]) -> str:
+    return "".join(line.render() for line in lines)
+
+
+def parse_body(body: list[str]) -> list[ContentLine]:
+    lines: list[ContentLine] = []
+    for raw in body:
+        if raw.startswith("\\"):
+            if lines:
+                lines[-1].bs = raw
+            continue
+        kind = {"+": "add", "-": "del"}.get(raw[0], "ctx")
+        lines.append(ContentLine(kind, raw))
+    return lines
+
+
+def parse_items(text: str) -> list[tuple[str, str | Hunk]]:
+    """Split diff text into ('raw', str) and ('hunk', Hunk) items, in order."""
+    lines = text.splitlines(keepends=True)
+    items: list[tuple[str, str | Hunk]] = []
+    raw_buf: list[str] = []
+    current_path: str | None = None
+    i = 0
+
+    def flush_raw() -> None:
+        if raw_buf:
+            items.append(("raw", "".join(raw_buf)))
+            raw_buf.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        m = HUNK_RE.match(line)
+        if m:
+            flush_raw()
+            body: list[str] = []
+            i += 1
+            while (
+                i < len(lines)
+                and not HUNK_RE.match(lines[i])
+                and not lines[i].startswith("diff --git ")
+            ):
+                body.append(lines[i])
+                i += 1
+            hunk = Hunk(
+                old_start=int(m.group(1)),
+                new_start=int(m.group(3)),
+                suffix=m.group(5) or "\n",
+                lines=parse_body(body),
+                path=current_path,
+            )
+            items.append(("hunk", hunk))
+            continue
+
+        if line.startswith("+++ "):
+            p = line[4:].rstrip("\n")
+            current_path = (
+                None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
+            )
+
+        raw_buf.append(line)
+        i += 1
+
+    flush_raw()
+    return items
+
+
+@dataclass
+class Split:
+    ctx_before: list[ContentLine]
+    comment: list[ContentLine]
+    core: list[ContentLine]
+    ctx_after: list[ContentLine]
+
+
+def split_hunk(lines: list[ContentLine]) -> Split | None:
+    i = 0
+    ctx_before = []
+    while i < len(lines) and lines[i].kind == "ctx":
+        ctx_before.append(lines[i])
+        i += 1
+
+    comment = []
+    while (
+        i < len(lines)
+        and lines[i].kind == "add"
+        and COMMENT_MARKER_RE.match(lines[i].text)
+    ):
+        comment.append(lines[i])
+        i += 1
+
+    last_change = None
+    for j in range(len(lines) - 1, i - 1, -1):
+        if lines[j].kind in ("add", "del"):
+            last_change = j
+            break
+    if last_change is None:
+        return None  # no real +/- lines (e.g. the WALKTHROUGH 0/N summary block)
+
+    return Split(
+        ctx_before, comment, lines[i : last_change + 1], lines[last_change + 1 :]
+    )
+
+
+def side_counts(lines: list[ContentLine]) -> tuple[int, int]:
+    old = sum(1 for cl in lines if cl.kind in ("ctx", "del"))
+    new = sum(1 for cl in lines if cl.kind in ("ctx", "add"))
+    return old, new
+
+
+@dataclass
+class Anchors:
+    old_start_core: int
+    new_start_core: int
+    ctx_before_start: int  # real new-file line number of split.ctx_before[0]
+    ctx_after_end: int  # real new-file line number of split.ctx_after[-1]
+    core_old_count: int
+    core_new_count: int
+
+
+def compute_anchors(hunk: Hunk, split: Split) -> Anchors:
+    comment_len = len(split.comment)
+    old_start_core = hunk.old_start + len(split.ctx_before)
+    new_start_core = hunk.new_start + comment_len + len(split.ctx_before)
+    core_old_count, core_new_count = side_counts(split.core)
+    return Anchors(
+        old_start_core=old_start_core,
+        new_start_core=new_start_core,
+        ctx_before_start=new_start_core - len(split.ctx_before),
+        ctx_after_end=new_start_core + core_new_count - 1 + len(split.ctx_after),
+        core_old_count=core_old_count,
+        core_new_count=core_new_count,
+    )
+
+
+def fetch_lines(file_lines: list[str], start: int, count: int) -> list[ContentLine]:
+    """1-indexed [start, start+count) slice of file_lines, as ctx ContentLines."""
+    result = []
+    for ln in range(start, start + count):
+        if ln < 1 or ln > len(file_lines):
+            continue
+        content = file_lines[ln - 1]
+        has_nl = content.endswith("\n")
+        cl = ContentLine("ctx", " " + (content if has_nl else content + "\n"))
+        if not has_nl:
+            cl.bs = "\\ No newline at end of file\n"
+        result.append(cl)
+    return result
+
+
+def load_file_lines(path: str) -> list[str] | None:
+    try:
+        with open(path, newline="") as f:
+            return f.read().splitlines(keepends=True)
+    except OSError:
+        return None
+
+
+def rebuild_hunk(
+    hunk: Hunk,
+    split: Split,
+    anchors: Anchors,
+    context: int,
+    extra_before: int,
+    extra_after: int,
+    file_lines: list[str] | None,
+) -> str:
+    fetched_before = (
+        fetch_lines(file_lines, anchors.ctx_before_start - extra_before, extra_before)
+        if extra_before and file_lines is not None
+        else []
+    )
+    fetched_after = (
+        fetch_lines(file_lines, anchors.ctx_after_end + 1, extra_after)
+        if extra_after and file_lines is not None
+        else []
+    )
+
+    kept_before = (
+        split.ctx_before[len(split.ctx_before) - context :]
+        if len(split.ctx_before) > context
+        else split.ctx_before
+    )
+    kept_after = split.ctx_after[:context]
+    new_ctx_before = fetched_before + kept_before
+    new_ctx_after = kept_after + fetched_after
+
+    old_count = len(new_ctx_before) + anchors.core_old_count + len(new_ctx_after)
+    new_count = (
+        len(new_ctx_before)
+        + len(split.comment)
+        + anchors.core_new_count
+        + len(new_ctx_after)
+    )
+    new_old_start = anchors.old_start_core - len(new_ctx_before)
+    # build-walkthrough clamps this to >= 1 too; ctx_before then shows numbers
+    # that don't correspond to the real file, same tradeoff it already makes.
+    new_new_start = max(
+        1, anchors.new_start_core - len(split.comment) - len(new_ctx_before)
+    )
+
+    parts = [
+        f"@@ -{new_old_start},{old_count} +{new_new_start},{new_count} @@{hunk.suffix}"
+    ]
+    parts.append(render_lines(new_ctx_before))
+    parts.append(render_lines(split.comment))
+    parts.append(render_lines(split.core))
+    parts.append(render_lines(new_ctx_after))
+    return "".join(parts)
+
+
+@dataclass
+class RealHunk:
+    item_index: int
+    hunk: Hunk
+    split: Split
+    anchors: Anchors
+
+
+def transform(text: str, context: int) -> str:
+    items = parse_items(text)
+
+    by_path: dict[str, list[RealHunk]] = {}
+    for idx, (kind, obj) in enumerate(items):
+        if kind != "hunk":
+            continue
+        hunk = obj
+        split = split_hunk(hunk.lines)
+        if split is None:
+            # Summary block or otherwise change-free hunk: pass through verbatim.
+            old_cnt, new_cnt = side_counts(hunk.lines)
+            header = f"@@ -{hunk.old_start},{old_cnt} +{hunk.new_start},{new_cnt} @@{hunk.suffix}"
+            items[idx] = ("raw", header + render_lines(hunk.lines))
+            continue
+        anchors = compute_anchors(hunk, split)
+        by_path.setdefault(hunk.path or "", []).append(
+            RealHunk(idx, hunk, split, anchors)
+        )
+
+    for path, real_hunks in by_path.items():
+        file_lines = load_file_lines(path) if path else None
+        total_lines = len(file_lines) if file_lines is not None else None
+        prev_actual_end = 0
+
+        for i, rh in enumerate(real_hunks):
+            gap_before = rh.anchors.ctx_before_start - 1 - prev_actual_end
+            desired_before = max(0, context - len(rh.split.ctx_before))
+            extra_before = min(desired_before, max(0, gap_before))
+
+            if i + 1 < len(real_hunks):
+                next_start = real_hunks[i + 1].anchors.ctx_before_start
+            else:
+                next_start = (
+                    (total_lines + 1)
+                    if total_lines is not None
+                    else rh.anchors.ctx_after_end + 1
+                )
+            gap_after = next_start - 1 - rh.anchors.ctx_after_end
+            desired_after = max(0, context - len(rh.split.ctx_after))
+            extra_after = min(desired_after, max(0, gap_after))
+
+            items[rh.item_index] = (
+                "raw",
+                rebuild_hunk(
+                    rh.hunk,
+                    rh.split,
+                    rh.anchors,
+                    context,
+                    extra_before,
+                    extra_after,
+                    file_lines,
+                ),
+            )
+            prev_actual_end = rh.anchors.ctx_after_end + extra_after
+
+    return "".join(text for _, text in items)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument(
+        "--context",
+        type=int,
+        required=True,
+        help="Target context lines before/after each step",
+    )
+    args = parser.parse_args()
+    if args.context < 0:
+        parser.error("--context must be >= 0")
+
+    sys.stdout.write(transform(sys.stdin.read(), args.context))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
