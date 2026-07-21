@@ -1,0 +1,313 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Plot additions/deletions over time for commits touching a git pathspec.
+
+Produces a self-contained HTML page (no external assets) with a diverging bar
+chart: one bar per commit, positioned by author date, additions above the
+axis and deletions below.
+
+Pathspecs are passed straight through to `git log`, so git's full pathspec
+syntax works, including magic exclude patterns.
+
+Examples:
+  # A single file
+  git-churn-plot service/history/workflow/task_generator.go
+
+  # A directory subtree
+  git-churn-plot chasm/
+
+  # Multiple pathspecs at once
+  git-churn-plot chasm/ service/history/
+
+  # Exclude generated Go code (protobuf / mockgen / *gen.go / tests):
+  git-churn-plot . ':(exclude)*pb.go' ':(exclude)*gen.go' \
+      ':(exclude)*mock.go' ':(exclude)*test*'
+
+  # Same, restricted to a subtree, over the last year, written to a fixed file:
+  git-churn-plot --since='1 year ago' -o churn.html \
+      service/ ':(exclude)*pb.go' ':(exclude)*gen.go' \
+      ':(exclude)*mock.go' ':(exclude)*test*'
+
+Tip: quote each exclude pathspec so your shell does not glob it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import date
+from html import escape
+from pathlib import Path
+
+FIELD_SEP = "\x1f"
+RECORD_SEP = "\x00"
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    day: date
+    subject: str
+    additions: int
+    deletions: int
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="git-churn-plot",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "pathspec",
+        nargs="+",
+        help="One or more git pathspecs (files, directories, or magic patterns).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write HTML here (default: a temp file).",
+    )
+    parser.add_argument(
+        "--since",
+        help="Passed to `git log --since` (e.g. '1 year ago', '2025-01-01').",
+    )
+    parser.add_argument(
+        "--until",
+        help="Passed to `git log --until`.",
+    )
+    parser.add_argument(
+        "-C",
+        dest="repo",
+        type=Path,
+        default=Path.cwd(),
+        help="Run git in this directory (default: cwd).",
+    )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not open the result in a browser.",
+    )
+    return parser.parse_args()
+
+
+def collect_commits(args: argparse.Namespace) -> list[Commit]:
+    cmd = [
+        "git",
+        "-C",
+        str(args.repo),
+        "log",
+        "--no-renames",
+        "--numstat",
+        "--date=short",
+        "--pretty=format:%x00%H%x1f%ad%x1f%s",
+    ]
+    if args.since:
+        cmd.append(f"--since={args.since}")
+    if args.until:
+        cmd.append(f"--until={args.until}")
+    cmd.append("--")
+    cmd.extend(args.pathspec)
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr.strip() or "git log failed")
+    return list(parse_log(proc.stdout))
+
+
+def parse_log(output: str):
+    for record in output.split(RECORD_SEP):
+        if not record.strip():
+            continue
+        header, _, body = record.partition("\n")
+        sha, day_str, subject = header.split(FIELD_SEP, 2)
+        additions = deletions = 0
+        for line in body.splitlines():
+            if not line:
+                continue
+            add, delete, _ = line.split("\t", 2)
+            additions += int(add) if add != "-" else 0
+            deletions += int(delete) if delete != "-" else 0
+        yield Commit(
+            sha=sha,
+            day=date.fromisoformat(day_str),
+            subject=subject,
+            additions=additions,
+            deletions=deletions,
+        )
+
+
+def render_html(commits: list[Commit], title: str) -> str:
+    data = [
+        {
+            "sha": c.sha,
+            "short": c.sha[:9],
+            "date": c.day.isoformat(),
+            "subject": c.subject,
+            "add": c.additions,
+            "del": c.deletions,
+        }
+        for c in commits
+    ]
+    total_add = sum(c.additions for c in commits)
+    total_del = sum(c.deletions for c in commits)
+    span = ""
+    if commits:
+        span = f"{commits[-1].day.isoformat()} → {commits[0].day.isoformat()}"
+    payload = json.dumps(data)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(title)}</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    margin: 0; padding: 24px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: Canvas; color: CanvasText;
+  }}
+  h1 {{ font-size: 16px; font-weight: 600; margin: 0 0 4px; word-break: break-all; }}
+  .meta {{ opacity: 0.7; margin-bottom: 16px; }}
+  .meta b.add {{ color: #2da44e; }}
+  .meta b.del {{ color: #cf222e; }}
+  .chart-shell {{ position: relative; }}
+  svg {{ width: 100%; height: auto; display: block; }}
+  .tip {{
+    position: fixed; pointer-events: none; z-index: 10;
+    background: Canvas; color: CanvasText;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px;
+    max-width: 420px; box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+    opacity: 0; transition: opacity 0.08s;
+  }}
+  .tip .s {{ font-family: ui-monospace, monospace; opacity: 0.7; }}
+  .tip .add {{ color: #2da44e; }} .tip .del {{ color: #cf222e; }}
+</style>
+</head>
+<body>
+  <h1>{escape(title)}</h1>
+  <div class="meta">
+    {len(commits)} commits &middot; {escape(span)} &middot;
+    <b class="add">+{total_add}</b> / <b class="del">-{total_del}</b>
+  </div>
+  <div class="chart-shell">
+    <svg id="chart" role="img" aria-label="{escape(title)}"></svg>
+    <div class="tip" id="tip"></div>
+  </div>
+<script>
+const data = {payload};
+const W = 1200, H = 560, M = {{t: 20, r: 20, b: 36, l: 56}};
+const iw = W - M.l - M.r, ih = H - M.t - M.b;
+const svg = document.getElementById("chart");
+const tip = document.getElementById("tip");
+const ns = "http://www.w3.org/2000/svg";
+svg.setAttribute("viewBox", `0 0 ${{W}} ${{H}}`);
+
+const el = (name, attrs) => {{
+  const e = document.createElementNS(ns, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}};
+
+if (!data.length) {{
+  svg.appendChild(el("text", {{x: W/2, y: H/2, "text-anchor": "middle", "fill": "currentColor"}}))
+     .textContent = "No commits match this pathspec.";
+}} else {{
+  const times = data.map(d => Date.parse(d.date));
+  const tMin = Math.min(...times), tMax = Math.max(...times);
+  const tSpan = (tMax - tMin) || 1;
+  const maxAdd = Math.max(1, ...data.map(d => d.add));
+  const maxDel = Math.max(1, ...data.map(d => d.del));
+  const x = t => M.l + (t - tMin) / tSpan * iw;
+  const zeroY = M.t + ih * (maxAdd / (maxAdd + maxDel));
+  const yAdd = v => zeroY - v / maxAdd * (zeroY - M.t);
+  const yDel = v => zeroY + v / maxDel * (M.t + ih - zeroY);
+  const bw = Math.max(1, Math.min(8, iw / data.length * 0.8));
+
+  // y gridlines / labels
+  const ticks = [maxAdd, Math.round(maxAdd/2), 0, -Math.round(maxDel/2), -maxDel];
+  for (const v of ticks) {{
+    const yy = v >= 0 ? yAdd(v) : yDel(-v);
+    svg.appendChild(el("line", {{x1: M.l, y1: yy, x2: W - M.r, y2: yy,
+      stroke: "currentColor", "stroke-opacity": v === 0 ? 0.4 : 0.12}}));
+    const lbl = el("text", {{x: M.l - 8, y: yy + 4, "text-anchor": "end",
+      fill: "currentColor", "font-size": 11, "fill-opacity": 0.7}});
+    lbl.textContent = (v > 0 ? "+" : "") + v;
+    svg.appendChild(lbl);
+  }}
+
+  // x axis date labels (first, middle, last)
+  const fmt = t => new Date(t).toISOString().slice(0, 10);
+  for (const t of [tMin, (tMin+tMax)/2, tMax]) {{
+    const lbl = el("text", {{x: x(t), y: H - 10, "text-anchor": "middle",
+      fill: "currentColor", "font-size": 11, "fill-opacity": 0.7}});
+    lbl.textContent = fmt(t);
+    svg.appendChild(lbl);
+  }}
+
+  for (const d of data) {{
+    const cx = x(Date.parse(d.date));
+    const g = el("g", {{}});
+    if (d.add > 0)
+      g.appendChild(el("rect", {{x: cx - bw/2, y: yAdd(d.add), width: bw,
+        height: Math.max(0.5, zeroY - yAdd(d.add)), fill: "#2da44e"}}));
+    if (d.del > 0)
+      g.appendChild(el("rect", {{x: cx - bw/2, y: zeroY, width: bw,
+        height: Math.max(0.5, yDel(d.del) - zeroY), fill: "#cf222e"}}));
+    // invisible wide hit target
+    g.appendChild(el("rect", {{x: cx - Math.max(bw, 4)/2, y: M.t,
+      width: Math.max(bw, 4), height: ih, fill: "transparent"}}));
+    g.addEventListener("mousemove", e => {{
+      tip.innerHTML = `<span class="s">${{d.short}}</span> ${{d.date}}<br>` +
+        `<b class="add">+${{d.add}}</b> / <b class="del">-${{d.del}}</b><br>` +
+        d.subject.replace(/[<>&]/g, c => ({{"<":"&lt;",">":"&gt;","&":"&amp;"}}[c]));
+      tip.style.opacity = 1;
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+      tip.style.top = (e.clientY + 14) + "px";
+    }});
+    g.addEventListener("mouseleave", () => tip.style.opacity = 0);
+    svg.appendChild(g);
+  }}
+}}
+</script>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    args = parse_args()
+    commits = collect_commits(args)
+    title = "git churn: " + " ".join(args.pathspec)
+
+    if args.output:
+        output_path = args.output
+    else:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", prefix="git-churn-", suffix=".html", delete=False
+        )
+        tmp.close()
+        output_path = Path(tmp.name)
+
+    output_path.write_text(render_html(commits, title), encoding="utf-8")
+    if not args.no_open:
+        subprocess.run(["open", str(output_path)], check=False)
+    print(output_path.resolve())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
