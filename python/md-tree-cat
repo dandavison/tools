@@ -1,0 +1,248 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pyyaml"]
+# ///
+"""Follow internal links from a root Markdown/MDX document and emit a depth-first
+concatenation of the reachable document tree.
+
+Designed for Docusaurus doc sets (e.g. temporalio/documentation) where internal
+links are site-absolute routes (``/references/sdk-metrics``) resolved via each
+file's frontmatter ``slug`` or its path relative to the docs root. Relative links
+(``./foo``, ``../bar``) are resolved against the linking file.
+
+Each file is emitted once, at its first (shallowest, left-most) point of
+discovery. External links, anchors, and asset links are ignored. Unresolved
+internal links are reported to stderr.
+"""
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+LINK_RE = re.compile(r"(?<!\!)\[(?:[^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)[^)]*\)")
+HREF_RE = re.compile(r"""\bhref\s*=\s*["']([^"']+)["']""")
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+DOC_SUFFIXES = (".md", ".mdx")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("root", type=Path, help="Root .md/.mdx document")
+    ap.add_argument("--docs-root", type=Path, help="Docs root (default: autodetect)")
+    ap.add_argument(
+        "--max-depth", type=int, default=None, help="Max link depth to follow"
+    )
+    ap.add_argument(
+        "--list", action="store_true", help="Print the tree only, no content"
+    )
+    args = ap.parse_args()
+
+    root = args.root.resolve()
+    if not root.is_file():
+        sys.exit(f"error: {root} is not a file")
+
+    docs_root = (args.docs_root or find_docs_root(root)).resolve()
+    index = build_route_index(docs_root)
+
+    tree = Traverser(docs_root, index, args.max_depth)
+    tree.visit(root, depth=0, parent=None)
+
+    if args.list:
+        for node in tree.order:
+            print(f"{'  ' * node.depth}{route_of(node.path, docs_root, index)}")
+    else:
+        emit(tree.order, docs_root, index)
+
+    for src, link in tree.unresolved:
+        print(f"unresolved: {link}  (in {src.relative_to(docs_root)})", file=sys.stderr)
+    return 0
+
+
+@dataclass
+class Node:
+    path: Path
+    depth: int
+    parent: Path | None
+
+
+@dataclass
+class Traverser:
+    docs_root: Path
+    index: dict[str, Path]
+    max_depth: int | None
+    order: list[Node] = field(default_factory=list)
+    visited: set[Path] = field(default_factory=set)
+    unresolved: list[tuple[Path, str]] = field(default_factory=list)
+
+    def visit(self, path: Path, depth: int, parent: Path | None) -> None:
+        path = path.resolve()
+        if path in self.visited:
+            return
+        self.visited.add(path)
+        self.order.append(Node(path, depth, parent))
+        if self.max_depth is not None and depth >= self.max_depth:
+            return
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for link in extract_links(text):
+            target = self.resolve(path, link)
+            if target is None:
+                if is_internal(link):
+                    self.unresolved.append((path, link))
+                continue
+            self.visit(target, depth + 1, path)
+
+    def resolve(self, src: Path, link: str) -> Path | None:
+        if not is_internal(link):
+            return None
+        route = link.split("#", 1)[0].split("?", 1)[0].strip()
+        if not route:
+            return None
+        if route.startswith("/"):
+            return lookup_route(route, self.index)
+        # Relative to the linking file, else a site-absolute route written without
+        # its leading slash (common in these docs).
+        candidate = as_doc_file((src.parent / route).resolve())
+        return candidate or lookup_route("/" + route, self.index)
+
+
+def extract_links(text: str) -> list[str]:
+    text = strip_code(text)
+    links: list[str] = []
+    for m in LINK_RE.finditer(text):
+        target = m.group(1)
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
+        links.append(target)
+    links.extend(HREF_RE.findall(text))
+    return links
+
+
+def strip_code(text: str) -> str:
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"`[^`\n]*`", "", text)
+    return text
+
+
+def is_internal(link: str) -> bool:
+    if not link:
+        return False
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", link):  # scheme: http, mailto, etc.
+        return False
+    if link.startswith(("//", "#", "mailto")):
+        return False
+    if link.startswith(
+        ("/img/", "/images/", "/assets/", "/static/", "/files/", "/json/")
+    ):
+        return False
+    suffix = Path(link.split("#")[0].split("?")[0]).suffix.lower()
+    if suffix and suffix not in DOC_SUFFIXES:  # asset (.png, .yaml, .json, ...)
+        return False
+    return True
+
+
+def build_route_index(docs_root: Path) -> dict[str, Path]:
+    """Map every site route to its backing file: frontmatter slug wins; otherwise
+    the path relative to docs root (with index files collapsing to their dir)."""
+    index: dict[str, Path] = {}
+    slugged: dict[str, Path] = {}
+    for path in sorted(docs_root.rglob("*")):
+        if path.suffix.lower() not in DOC_SUFFIXES or not path.is_file():
+            continue
+        rel = path.relative_to(docs_root).with_suffix("")
+        default = "/" + str(rel)
+        index.setdefault(norm(default), path)
+        if rel.name in ("index", rel.parent.name):  # foo/index.* and foo/foo.* -> /foo
+            index.setdefault(norm("/" + str(rel.parent)), path)
+        slug = frontmatter_slug(path)
+        if slug:
+            slugged[norm(slug)] = path
+    index.update(slugged)  # slugs take precedence over path-derived routes
+    return index
+
+
+def frontmatter_slug(path: Path) -> str | None:
+    m = FRONTMATTER_RE.match(path.read_text(encoding="utf-8", errors="replace"))
+    if not m:
+        return None
+    try:
+        data = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("slug"), str):
+        return data["slug"]
+    return None
+
+
+def lookup_route(route: str, index: dict[str, Path]) -> Path | None:
+    return index.get(norm(route))
+
+
+def route_of(path: Path, docs_root: Path, index: dict[str, Path]) -> str:
+    for route, p in index.items():
+        if p == path and frontmatter_slug(path) == route:
+            return route
+    return "/" + str(path.relative_to(docs_root).with_suffix(""))
+
+
+def norm(route: str) -> str:
+    route = route.split("#")[0].split("?")[0]
+    for suffix in DOC_SUFFIXES:
+        if route.endswith(suffix):
+            route = route[: -len(suffix)]
+    route = "/" + route.strip("/")
+    return route
+
+
+def as_doc_file(path: Path) -> Path | None:
+    if path.suffix.lower() in DOC_SUFFIXES and path.is_file():
+        return path
+    for suffix in DOC_SUFFIXES:
+        cand = path.with_suffix(suffix)
+        if cand.is_file():
+            return cand
+    for suffix in DOC_SUFFIXES:
+        cand = path / f"index{suffix}"
+        if cand.is_file():
+            return cand
+    return None
+
+
+def find_docs_root(start: Path) -> Path:
+    for parent in [start, *start.parents]:
+        if (parent / "docusaurus.config.js").is_file() or (
+            parent / "docusaurus.config.ts"
+        ).is_file():
+            docs = parent / "docs"
+            if docs.is_dir():
+                return docs
+    # Fallback: nearest ancestor directory literally named "docs", else the file's dir.
+    for parent in start.parents:
+        if parent.name == "docs":
+            return parent
+    return start.parent
+
+
+def emit(order: list[Node], docs_root: Path, index: dict[str, Path]) -> None:
+    for node in order:
+        route = route_of(node.path, docs_root, index)
+        rel = node.path.relative_to(docs_root)
+        parent = route_of(node.parent, docs_root, index) if node.parent else None
+        print("=" * 100)
+        print(f"# [depth {node.depth}] {route}")
+        print(f"# file: {rel}")
+        if parent:
+            print(f"# linked from: {parent}")
+        print("=" * 100)
+        print()
+        print(node.path.read_text(encoding="utf-8", errors="replace").rstrip("\n"))
+        print()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
