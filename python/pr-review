@@ -34,8 +34,6 @@ When you exit due to a problem, explain the problem.
 
 - Ensure that you are in a directory containing a clone of the PR's repo, with the commit corresponding to the PR checked out. Exit if not.
 
-- Use gh to check that tests in CI are passing. If there are any failures that are relevant to these changes, exit.
-
 - Describe what the author is trying to achieve. If you are not confident about this, exit.
 
 - If their intention is not appropriate, exit.
