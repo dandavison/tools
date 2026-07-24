@@ -39,7 +39,12 @@ def main() -> int:
         "--max-depth", type=int, default=None, help="Max link depth to follow"
     )
     ap.add_argument(
-        "--list", action="store_true", help="Print the tree only, no content"
+        "--list", action="store_true", help="Print the route tree only, no content"
+    )
+    ap.add_argument(
+        "--paths",
+        action="store_true",
+        help="Print one file path per line (DFS order), for piping to `xargs cat`",
     )
     args = ap.parse_args()
 
@@ -53,7 +58,10 @@ def main() -> int:
     tree = Traverser(docs_root, index, args.max_depth)
     tree.visit(root, depth=0, parent=None)
 
-    if args.list:
+    if args.paths:
+        for node in tree.order:
+            print(relpath(node.path))
+    elif args.list:
         for node in tree.order:
             print(f"{'  ' * node.depth}{route_of(node.path, docs_root, index)}")
     else:
@@ -188,6 +196,13 @@ def route_of(path: Path, docs_root: Path, index: dict[str, Path]) -> str:
         if p == path and frontmatter_slug(path) == route:
             return route
     return "/" + str(path.relative_to(docs_root).with_suffix(""))
+
+
+def relpath(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
 
 
 def norm(route: str) -> str:
