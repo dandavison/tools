@@ -12,13 +12,17 @@ prints its Markdown. This is Notion's own high-fidelity export, identical to the
 "Export" menu item.
 
 Usage:
-  notion-export <notion-url> [--recursive] [--profile "Profile 1"]
+  notion-fetch <notion-url> [--recursive] [--profile "Profile 1"]
+
+Notion's export omits comments, so the page's comment threads are fetched
+separately from the private record API and appended.
 
 Requires being logged into Notion in Chrome. The first run triggers a one-time
 macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
 """
 
 import argparse
+import datetime
 import io
 import json
 import os
@@ -28,6 +32,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -60,11 +65,13 @@ def main() -> int:
     export_url = poll_export(task_id, token, args.timeout)
     log(f"downloading {export_url}")
     sys.stdout.write(markdown_from_zip(download(export_url, cookies)))
+    sys.stdout.write(comments_markdown(block_id, token))
     return 0
 
 
 def extract_block_id(url: str) -> str:
-    ids = UUID_RE.findall(url)
+    # Drop any #block anchor so we export the page, not the anchored sub-block.
+    ids = UUID_RE.findall(url.split("#", 1)[0])
     if not ids:
         die(f"no page id found in URL: {url}")
     raw = ids[-1].replace("-", "").lower()
@@ -142,6 +149,142 @@ def markdown_from_zip(data: bytes) -> str:
     if len(names) == 1:
         return zf.read(names[0]).decode("utf-8")
     return "\n\n\n".join(f"<!-- {n} -->\n\n{zf.read(n).decode('utf-8')}" for n in names)
+
+
+def comments_markdown(page_id: str, token: str) -> str:
+    """Notion's export omits comments; fetch them from the private record API.
+
+    ``loadPageChunk`` returns the page's ``comment``, ``discussion``, and
+    ``notion_user`` records inline. A comment's ``parent_id`` is its discussion;
+    a discussion's ``parent_id`` is the block it annotates (or the page itself).
+    """
+    records = load_page_records(page_id, token)
+    comments = records.get("comment", {})
+    if not comments:
+        log("no comments found")
+        return ""
+    order = block_order(records.get("block", {}), page_id)
+    return render_comments(
+        order, records.get("discussion", {}), comments, records.get("notion_user", {})
+    )
+
+
+def render_comments(
+    order: list[str],
+    discussions: dict[str, Any],
+    comments: dict[str, Any],
+    users: dict[str, Any],
+) -> str:
+    position = {bid: i for i, bid in enumerate(order)}
+    threads: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in comments.values():
+        if c.get("alive") is not False:
+            threads[c.get("parent_id")].append(c)
+
+    def thread_key(discussion_id: str) -> tuple[int, str]:
+        anchor = (discussions.get(discussion_id) or {}).get("parent_id")
+        return position.get(anchor, len(order)), discussion_id
+
+    out = ["", "## Comments", ""]
+    for did in sorted(threads, key=thread_key):
+        disc = discussions.get(did) or {}
+        context = rich_text(disc.get("context"), users).strip()
+        heading = f'On "{context}"' if context else "Page comment"
+        if disc.get("resolved"):
+            heading += " _(resolved)_"
+        out.append(f"### {heading}")
+        for c in sorted(threads[did], key=lambda c: c.get("created_time") or 0):
+            author = users.get(c.get("created_by_id") or c.get("created_by")) or {}
+            when = fmt_time(c.get("created_time"))
+            body = rich_text(c.get("text"), users).strip()
+            out.append(
+                f"- **{user_name(author)}**{f' ({when})' if when else ''}: {body}"
+            )
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def load_page_records(page_id: str, token: str) -> dict[str, dict[str, Any]]:
+    tables: dict[str, dict[str, Any]] = defaultdict(dict)
+    cursor: dict[str, Any] = {"stack": []}
+    while True:
+        resp = api_post(
+            "loadPageChunk",
+            {
+                "pageId": page_id,
+                "limit": 100,
+                "cursor": cursor,
+                "chunkNumber": 0,
+                "verticalColumns": False,
+            },
+            token,
+        )
+        for table, recs in (resp.get("recordMap") or {}).items():
+            if not isinstance(recs, dict):
+                continue  # e.g. __version__
+            for rid, rec in recs.items():
+                value = unwrap(rec)
+                if value:
+                    tables[table][rid] = value
+        cursor = resp.get("cursor") or {}
+        if not cursor.get("stack"):
+            return tables
+
+
+def unwrap(rec: Any) -> dict[str, Any] | None:
+    """Peel record wrappers ({spaceId/value/role: ...}) down to the record itself,
+    which is the first nested dict carrying an ``id``."""
+    while (
+        isinstance(rec, dict) and "id" not in rec and isinstance(rec.get("value"), dict)
+    ):
+        rec = rec["value"]
+    return rec if isinstance(rec, dict) and "id" in rec else None
+
+
+def user_name(user: dict[str, Any]) -> str:
+    parts = [user.get("given_name"), user.get("family_name")]
+    return user.get("name") or " ".join(p for p in parts if p) or "Unknown"
+
+
+def block_order(blocks: dict[str, Any], root: str) -> list[str]:
+    order: list[str] = []
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        bid = stack.pop()
+        if bid in seen or bid not in blocks:
+            continue
+        seen.add(bid)
+        order.append(bid)
+        stack.extend(reversed(blocks[bid].get("content") or []))
+    return order
+
+
+def rich_text(rt: Any, users: dict[str, Any]) -> str:
+    if not isinstance(rt, list):
+        return ""
+    parts: list[str] = []
+    for seg in rt:
+        if not seg:
+            continue
+        text = seg[0]
+        decorations = seg[1] if len(seg) > 1 else []
+        mention = next((d for d in decorations if d and d[0] == "u"), None)
+        if mention and len(mention) > 1:
+            name = users.get(mention[1], {}).get("name")
+            parts.append(f"@{name}" if name else text)
+        else:
+            parts.append(text)
+    return "".join(parts)
+
+
+def fmt_time(ms: Any) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(int(ms) / 1000).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    except (TypeError, ValueError, OSError):
+        return ""
 
 
 def api_post(path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
