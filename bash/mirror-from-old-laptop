@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# Pull one directory tree from the old laptop to this (new) laptop over the
+# LAN, via rsync+ssh. Symlinks are copied as symlinks — never dereferenced —
+# and keep pointing at whatever absolute path they pointed at before; since
+# both laptops use the same $HOME layout (same username), those paths
+# resolve the same way here.
+#
+# --- One-time setup ---
+#
+# 1. Put both laptops on the same network: same Wi-Fi, or better, both on
+#    Ethernet into the same router — much faster/more reliable than Wi-Fi
+#    for big trees like ~/src.
+#
+# 2. On the OLD laptop, enable SSH:
+#      System Settings > General > Sharing > Remote Login -> On
+#
+# 3. Find the OLD laptop's address. Easiest is its Bonjour hostname, shown
+#    at the top of System Settings > General > Sharing (e.g.
+#    "Dans-MacBook-Pro.local") — that resolves on the LAN with no IP lookup
+#    needed. If Bonjour is flaky, use the IP instead: on the OLD laptop,
+#    System Settings > Wi-Fi > (i) next to the network, or run
+#    `ipconfig getifaddr en0` (en1 if it's on Ethernet) in Terminal.
+#
+# 4. Install a modern rsync on BOTH machines. The one macOS ships (2.6.9,
+#    from 2006) can't do extended attributes/ACLs and is much slower:
+#      brew install rsync
+#
+# 5. On the NEW laptop:
+#      export OLD_LAPTOP_HOST=dan@Dans-MacBook-Pro.local
+#      ./mirror-from-old-laptop src
+#      ./mirror-from-old-laptop tmp/3p
+#
+# Both machines are Apple Silicon (arm64), so compiled binaries and venvs
+# under these directories should run as-is on the new laptop.
+#
+# This uses --delete, so re-running after removing files on the old laptop
+# removes them here too, keeping the two copies an exact mirror.
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: OLD_LAPTOP_HOST=user@host $0 <path-relative-to-home>" >&2
+    exit 1
+fi
+: "${OLD_LAPTOP_HOST:?set OLD_LAPTOP_HOST to user@old-laptop, e.g. dan@Dans-MacBook-Pro.local}"
+
+rsync=/opt/homebrew/bin/rsync
+[[ -x $rsync ]] || { echo "$rsync not found — run: brew install rsync" >&2; exit 1; }
+
+rel_path=${1%/}
+dest="$HOME/$rel_path"
+mkdir -p "$dest"
+
+"$rsync" -aHAX --delete --progress \
+    --rsync-path="$rsync" \
+    "$OLD_LAPTOP_HOST:~/$rel_path/" "$dest/"
