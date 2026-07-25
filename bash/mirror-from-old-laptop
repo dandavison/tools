@@ -8,18 +8,32 @@
 #
 # --- One-time setup ---
 #
-# 1. Put both laptops on the same network: same Wi-Fi, or better, both on
-#    Ethernet into the same router — much faster/more reliable than Wi-Fi
-#    for big trees like ~/src.
+# 1. Connect the two laptops.
+#
+#    Fastest: a USB-C cable straight between them, no hub. Both are
+#    Thunderbolt/USB4 MacBook Pros, so a plain USB-C cable is enough — it
+#    doesn't need to be Thunderbolt-branded. Plug it in, wait a few seconds,
+#    then on both Macs check System Settings > Network for a new
+#    "Thunderbolt Bridge" interface showing as connected. "Self-Assigned IP"
+#    is normal here (no DHCP server on a direct link) and fine to use.
+#
+#    Otherwise: same Wi-Fi, or both on Ethernet into the same router — works,
+#    just slower for big trees like ~/src.
 #
 # 2. On the OLD laptop, enable SSH:
 #      System Settings > General > Sharing > Remote Login -> On
 #
-# 3. Find the OLD laptop's address. Easiest is its Bonjour hostname, shown
-#    at the top of System Settings > General > Sharing (e.g.
-#    "Dans-MacBook-Pro.local") — that resolves on the LAN with no IP lookup
-#    needed. If Bonjour is flaky, use the IP instead: on the OLD laptop,
-#    System Settings > Wi-Fi > (i) next to the network, or run
+# 3. Find the OLD laptop's address.
+#
+#    If using the USB-C link: use its IP, not the .local hostname — the
+#    hostname can resolve to the Wi-Fi address instead and miss the direct
+#    link entirely. On the OLD laptop, System Settings > Network >
+#    Thunderbolt Bridge > Details shows its IP (e.g. 169.254.x.x).
+#
+#    Otherwise, the Bonjour hostname is easiest — shown at the top of
+#    System Settings > General > Sharing (e.g. "Dans-MacBook-Pro.local"),
+#    resolves on the LAN with no IP lookup needed. If that's flaky, get the
+#    IP instead: System Settings > Wi-Fi > (i) next to the network, or run
 #    `ipconfig getifaddr en0` (en1 if it's on Ethernet) in Terminal.
 #
 # 4. Install a modern rsync on BOTH machines. The one macOS ships (2.6.9,
@@ -27,7 +41,7 @@
 #      brew install rsync
 #
 # 5. On the NEW laptop:
-#      export OLD_LAPTOP_HOST=dan@Dans-MacBook-Pro.local
+#      export OLD_LAPTOP_HOST=dan@Dans-MacBook-Pro.local   # or dan@169.254.x.x for the USB-C link
 #      ./mirror-from-old-laptop src
 #      ./mirror-from-old-laptop tmp/3p
 #
