@@ -50,8 +50,12 @@ for n in "${issues[@]}"; do
 done
 
 send_newline() {
-    tmux send-keys -t "$pane" -H 5c  # backslash; with Enter, claude inserts a newline
-    tmux send-keys -t "$pane" Enter
+    if [[ "${agent[0]}" == claude ]]; then
+        tmux send-keys -t "$pane" -H 5c  # backslash; with Enter, claude inserts a newline
+        tmux send-keys -t "$pane" Enter
+    else
+        tmux send-keys -t "$pane" C-j  # codex: ctrl-j inserts a newline without submitting
+    fi
 }
 
 (
