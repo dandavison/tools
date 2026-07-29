@@ -5,7 +5,7 @@
 # Clear everything cached to speed up shell startup, so it regenerates on the
 # next shell. Currently: generated completion scripts (temporal, uv, delta,
 # should, ...) and vivid's LS_COLORS. See env.sh ($ZSH_STARTUP_CACHE) and
-# load-completions in ~/src/devenv/shell-config/completion.sh. Run after
+# load-completions in ~/src/devenv/shell/completion.sh. Run after
 # upgrading a tool (new subcommands/flags) or vivid (new theme output).
 set -euo pipefail
 

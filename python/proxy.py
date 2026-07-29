@@ -66,7 +66,7 @@ REPO_PATHS = {
     "sdk-typescript-bridge": "/Users/dan/src/temporalio/sdk-typescript/packages/core-bridge",
     "sdk-typescript": "/Users/dan/src/temporalio/sdk-typescript",
     "server": "/Users/dan/src/temporalio/docker-builds/temporal",
-    "shell-config": "/Users/dan/src/devenv/shell-config",
+    "shell": "/Users/dan/src/devenv/shell",
     "src": "/Users/dan/src",
     "swimlanesio-links": "/Users/dan/src/swimlanesio-links",
     "temporal-cli": "/Users/dan/src/temporalio/cli",
