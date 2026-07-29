@@ -1,0 +1,357 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path, PurePosixPath
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Rewrite the current branch, replacing a submodule with its files and history."
+    )
+    parser.add_argument("path", help="submodule path relative to the repository root")
+    args = parser.parse_args()
+
+    try:
+        inline_submodule(normalize_path(args.path))
+    except GitError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def inline_submodule(path: str) -> None:
+    root = Path(git_text("rev-parse", "--show-toplevel").strip())
+    os.chdir(root)
+    require_clean_worktree()
+    branch_ref = git_text("symbolic-ref", "-q", "HEAD", allowed=(0, 1)).strip()
+    if not branch_ref.startswith("refs/heads/"):
+        raise GitError("HEAD must be attached to a local branch")
+    require_submodule(path)
+
+    old_head = git_text("rev-parse", "HEAD").strip()
+    parent_commits = lines(git_text("rev-list", "--reverse", "--topo-order", old_head))
+    targets = {
+        target
+        for commit in parent_commits
+        if (target := submodule_target(commit, path)) is not None
+    }
+    import_submodule_objects(path, targets)
+
+    rewritten_submodule = rewrite_submodule_commits(path, targets)
+    with tempfile.TemporaryDirectory(
+        prefix="git-submodule-inline-destructively-"
+    ) as directory:
+        rewritten_head = rewrite_parent_commits(
+            parent_commits,
+            path,
+            rewritten_submodule,
+            Path(directory),
+        )
+
+    git("submodule", "deinit", "-f", "--", path)
+    remove_submodule_git_directory(root, path)
+    git("update-ref", branch_ref, rewritten_head, old_head)
+    git("reset", "--hard", rewritten_head)
+    print(f"Rewrote {branch_ref}: {old_head} -> {rewritten_head}")
+
+
+def remove_submodule_git_directory(root: Path, path: str) -> None:
+    common_directory = Path(git_text("rev-parse", "--git-common-dir").strip())
+    if not common_directory.is_absolute():
+        common_directory = root / common_directory
+    modules_root = common_directory / "modules"
+    submodule_directory = modules_root.joinpath(*PurePosixPath(path).parts)
+    if submodule_directory.exists():
+        shutil.rmtree(submodule_directory)
+    directory = submodule_directory.parent
+    while directory != modules_root:
+        try:
+            directory.rmdir()
+        except OSError:
+            break
+        directory = directory.parent
+
+
+def normalize_path(value: str) -> str:
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise GitError("submodule path must be relative to the repository root")
+    normalized = path.as_posix().removeprefix("./")
+    if normalized in {"", "."}:
+        raise GitError("submodule path must not be the repository root")
+    return normalized
+
+
+def require_clean_worktree() -> None:
+    status = git_text(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status:
+        raise GitError("a clean working tree and clean submodules are required")
+
+
+def require_submodule(path: str) -> None:
+    if submodule_target("HEAD", path) is None:
+        raise GitError(f"{path} is not a submodule at HEAD")
+    modules = Path(".gitmodules")
+    if not modules.is_file() or not submodule_sections(modules, path):
+        raise GitError(f"{path} is not configured in .gitmodules")
+    result = git("-C", path, "rev-parse", "--is-inside-work-tree", allowed=(0, 128))
+    if result.returncode != 0:
+        raise GitError(f"{path} must be initialized")
+
+
+def import_submodule_objects(path: str, targets: set[str]) -> None:
+    for target in sorted(targets):
+        result = git(
+            "-C",
+            path,
+            "cat-file",
+            "-e",
+            f"{target}^{{commit}}",
+            allowed=(0, 1, 128),
+        )
+        if result.returncode != 0:
+            raise GitError(f"submodule checkout does not contain commit {target}")
+        if git(
+            "cat-file", "-e", f"{target}^{{commit}}", allowed=(0, 1, 128)
+        ).returncode:
+            git("fetch", "--quiet", "--no-tags", path, target)
+
+
+def rewrite_submodule_commits(path: str, targets: set[str]) -> dict[str, str]:
+    commits = lines(git_text("rev-list", "--reverse", "--topo-order", *sorted(targets)))
+    rewritten: dict[str, str] = {}
+    for commit in commits:
+        tree = git_text("rev-parse", f"{commit}^{{tree}}").strip()
+        prefixed_tree = prefix_tree(tree, path)
+        parents = [rewritten[parent] for parent in commit_parents(commit)]
+        rewritten[commit] = rewrite_commit(commit, prefixed_tree, parents)
+    return rewritten
+
+
+def prefix_tree(tree: str, path: str) -> str:
+    for component in reversed(PurePosixPath(path).parts):
+        entry = f"040000 tree {tree}\t{component}".encode() + b"\0"
+        tree = git_bytes("mktree", "-z", input=entry).decode().strip()
+    return tree
+
+
+def rewrite_parent_commits(
+    commits: list[str],
+    path: str,
+    rewritten_submodule: dict[str, str],
+    temporary_directory: Path,
+) -> str:
+    rewritten: dict[str, str] = {}
+    index = temporary_directory / "index"
+    modules = temporary_directory / "gitmodules"
+    for commit in commits:
+        target = submodule_target(commit, path)
+        tree = rewrite_parent_tree(commit, path, target, index, modules)
+        parents = [rewritten[parent] for parent in commit_parents(commit)]
+        if target is not None:
+            submodule_parent = rewritten_submodule[target]
+            if not any(is_ancestor(submodule_parent, parent) for parent in parents):
+                parents.append(submodule_parent)
+        rewritten[commit] = rewrite_commit(commit, tree, parents)
+    return rewritten[commits[-1]]
+
+
+def rewrite_parent_tree(
+    commit: str,
+    path: str,
+    target: str | None,
+    index: Path,
+    modules: Path,
+) -> str:
+    env = {"GIT_INDEX_FILE": str(index)}
+    git("read-tree", f"{commit}^{{tree}}", env=env)
+    if target is not None:
+        git("update-index", "--force-remove", "--", path, env=env)
+        submodule_tree = git_text("rev-parse", f"{target}^{{tree}}").strip()
+        git("read-tree", f"--prefix={path}/", submodule_tree, env=env)
+    rewrite_gitmodules(commit, path, modules, env)
+    return git_text("write-tree", env=env).strip()
+
+
+def rewrite_gitmodules(
+    commit: str, path: str, modules: Path, env: dict[str, str]
+) -> None:
+    entry = tree_entry(commit, ".gitmodules")
+    if entry is None:
+        return
+    mode, blob = entry
+    modules.write_bytes(git_bytes("cat-file", "blob", blob))
+    sections = submodule_sections(modules, path)
+    for section in sections:
+        git("config", "-f", str(modules), "--remove-section", section)
+    if not sections:
+        return
+    if submodule_path_keys(modules):
+        rewritten_blob = (
+            git_bytes("hash-object", "-w", "--stdin", input=modules.read_bytes())
+            .decode()
+            .strip()
+        )
+        git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            mode,
+            rewritten_blob,
+            ".gitmodules",
+            env=env,
+        )
+    else:
+        git("update-index", "--force-remove", "--", ".gitmodules", env=env)
+
+
+def submodule_sections(modules: Path, path: str) -> list[str]:
+    sections = []
+    for key in submodule_path_keys(modules):
+        configured_path = git_text("config", "-f", str(modules), "--get", key).strip()
+        if PurePosixPath(configured_path).as_posix() == path:
+            sections.append(key.removesuffix(".path"))
+    return sections
+
+
+def submodule_path_keys(modules: Path) -> list[str]:
+    result = git(
+        "config",
+        "-f",
+        str(modules),
+        "--name-only",
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+        allowed=(0, 1),
+    )
+    return lines(result.stdout.decode())
+
+
+def submodule_target(commit: str, path: str) -> str | None:
+    entry = tree_entry(commit, path)
+    if entry is None or entry[0] != "160000":
+        return None
+    return entry[1]
+
+
+def tree_entry(commit: str, path: str) -> tuple[str, str] | None:
+    output = git_bytes("ls-tree", "-z", commit, "--", path)
+    if not output:
+        return None
+    metadata, returned_path = output.rstrip(b"\0").split(b"\t", 1)
+    if returned_path.decode() != path:
+        return None
+    mode, _kind, object_id = metadata.decode().split()
+    return mode, object_id
+
+
+def commit_parents(commit: str) -> list[str]:
+    return git_text("show", "-s", "--format=%P", commit).strip().split()
+
+
+def rewrite_commit(commit: str, tree: str, parents: list[str]) -> str:
+    raw = git_bytes("cat-file", "commit", commit)
+    raw_headers, message = raw.split(b"\n\n", 1)
+    headers = grouped_headers(raw_headers)
+    kept_headers = [
+        header
+        for header in headers
+        if header.split(b" ", 1)[0] not in {b"tree", b"parent", b"gpgsig", b"mergetag"}
+    ]
+    rewritten_headers = [f"tree {tree}".encode()]
+    rewritten_headers.extend(f"parent {parent}".encode() for parent in parents)
+    rewritten_headers.extend(kept_headers)
+    rewritten = b"\n".join(rewritten_headers) + b"\n\n" + message
+    return (
+        git_bytes("hash-object", "-t", "commit", "-w", "--stdin", input=rewritten)
+        .decode()
+        .strip()
+    )
+
+
+def grouped_headers(raw_headers: bytes) -> list[bytes]:
+    headers: list[bytes] = []
+    for line in raw_headers.splitlines():
+        if line.startswith(b" "):
+            headers[-1] += b"\n" + line
+        else:
+            headers.append(line)
+    return headers
+
+
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    return (
+        git(
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+            allowed=(0, 1),
+        ).returncode
+        == 0
+    )
+
+
+def lines(value: str) -> list[str]:
+    return [line for line in value.splitlines() if line]
+
+
+def git_text(
+    *args: str,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+    allowed: tuple[int, ...] = (0,),
+) -> str:
+    return git_bytes(*args, input=input, env=env, allowed=allowed).decode()
+
+
+def git_bytes(
+    *args: str,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+    allowed: tuple[int, ...] = (0,),
+) -> bytes:
+    return git(*args, input=input, env=env, allowed=allowed).stdout
+
+
+def git(
+    *args: str,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+    allowed: tuple[int, ...] = (0,),
+) -> subprocess.CompletedProcess[bytes]:
+    result = subprocess.run(
+        ["git", *args],
+        input=input,
+        capture_output=True,
+        env=os.environ | (env or {}),
+    )
+    if result.returncode not in allowed:
+        message = result.stderr.decode(errors="replace").strip()
+        raise GitError(message or f"git {' '.join(args)} failed")
+    return result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

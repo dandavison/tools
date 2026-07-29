@@ -1,0 +1,29 @@
+#!/bin/bash
+# Run: tests/repro_git_submodule_inline_destructively
+
+set -euo pipefail
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+command='uv run --with pytest pytest tests/test_git_submodule_inline_destructively.py -q'
+
+if $command >"$tmpdir/stdout" 2>"$tmpdir/stderr"; then
+    status=0
+else
+    status=$?
+fi
+
+printf '# Inline-submodule reproduction\n\n'
+printf 'This checks that a submodule can be replaced by ordinary files while its commits remain in the parent repository history.\n\n'
+printf '## Command\n\n```bash\n%s\n```\n\n' "$command"
+printf '## Standard output\n\n```\n'
+sed 's/```/` ` `/g' "$tmpdir/stdout"
+printf '```\n\n## Standard error\n\n```\n'
+sed 's/```/` ` `/g' "$tmpdir/stderr"
+printf '```\n\n## Exit code\n\n`%s`\n\n' "$status"
+if ((status == 0)); then
+    printf '## Finding\n\nThe tool satisfies the tested inlining, history, configuration, and safety requirements.\n'
+else
+    printf '## Finding\n\nThe requested inlining behavior is absent or incorrect; the failing assertions above identify the mismatch.\n'
+fi
+exit "$status"
