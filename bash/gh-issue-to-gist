@@ -1,0 +1,81 @@
+#!/bin/bash
+
+set -e
+
+if [[ -z "$1" ]]; then
+    echo "Usage: gh-issue-to-gist <issue-number-or-url>" >&2
+    exit 1
+fi
+
+url="$1"
+
+# Accept bare issue numbers defaulting to dandavison/log
+if [[ "$url" =~ ^[0-9]+$ ]]; then
+    url="https://github.com/dandavison/log/issues/$url"
+fi
+
+# Parse GitHub issue URL
+# Supports: https://github.com/owner/repo/issues/123
+if [[ "$url" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+    issue_number="${BASH_REMATCH[3]}"
+else
+    echo "Error: Invalid GitHub issue URL" >&2
+    echo "Expected format: https://github.com/owner/repo/issues/123" >&2
+    exit 1
+fi
+
+api_path="/repos/$owner/$repo/issues/$issue_number"
+
+# Fetch issue details
+issue=$(gh api "$api_path")
+title=$(echo "$issue" | jq -r '.title')
+body=$(echo "$issue" | jq -r '.body // ""')
+author=$(echo "$issue" | jq -r '.user.login')
+created_at=$(echo "$issue" | jq -r '.created_at')
+
+# Write each part to a zero-padded file so the gist displays them in
+# chronological order; files are passed to `gh gist create` in reverse
+# order for the same reason.
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+{
+    echo "# $title"
+    echo
+    echo "*Issue by @$author on $created_at*"
+    echo
+    if [[ -n "$body" && "$body" != "null" ]]; then
+        echo "$body"
+    fi
+} > "$tmpdir/000-issue.md"
+
+# Fetch comments and write one file per comment
+comments=$(gh api "$api_path/comments" --paginate | jq -s 'add // []')
+
+i=1
+echo "$comments" | jq -c '.[]' | while read -r comment; do
+    comment_author=$(echo "$comment" | jq -r '.user.login')
+    comment_created=$(echo "$comment" | jq -r '.created_at')
+    comment_body=$(echo "$comment" | jq -r '.body // ""')
+
+    file=$(printf '%s/%03d-comment-%s.md' "$tmpdir" "$i" "$comment_author")
+    {
+        echo "### @$comment_author on $comment_created"
+        echo
+        if [[ -n "$comment_body" && "$comment_body" != "null" ]]; then
+            echo "$comment_body"
+        fi
+    } > "$file"
+    i=$((i + 1))
+done
+
+# Create the gist with files in reverse order so they display chronologically
+files=()
+for file in $(find "$tmpdir" -type f -name '*.md' | sort -r); do
+    files+=("$file")
+done
+
+gist_url=$(gh gist create -d "$owner/$repo#$issue_number: $title" "${files[@]}")
+echo "$gist_url"
