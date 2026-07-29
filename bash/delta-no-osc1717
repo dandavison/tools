@@ -1,0 +1,3 @@
+#!/bin/bash
+
+OSC1717= delta "$@"
