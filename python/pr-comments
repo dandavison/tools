@@ -1,0 +1,188 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+#
+# Fetch all comments on a GitHub PR and render them as chronological markdown.
+#
+# Combines the three distinct comment surfaces GitHub exposes:
+#   - issue comments   (top-level conversation)
+#   - reviews          (approve/request-changes/comment, with an optional body)
+#   - review comments  (inline, anchored to a file/line, threaded via replies)
+# All are interleaved by time. Inline comments show their file, line, and diff
+# hunk, and replies are nested under the comment they answer.
+#
+# Usage:
+#     pr-comments <github-url | pr-number>   # render comments as markdown
+#     pr-comments --repo owner/name 123      # explicit repo for a bare number
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime
+from typing import Any
+
+REVIEW_STATE = {
+    "APPROVED": "✅ approved",
+    "CHANGES_REQUESTED": "🔴 requested changes",
+    "COMMENTED": "💬 commented",
+    "DISMISSED": "⚪ dismissed",
+}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="pr-comments", description="Render a GitHub PR's comments as markdown."
+    )
+    parser.add_argument("pr", help="GitHub PR URL or number")
+    parser.add_argument("--repo", help="owner/name (for a bare PR number)")
+    args = parser.parse_args()
+
+    owner, repo, number = resolve(args.pr, args.repo)
+    print(render(owner, repo, number))
+    return 0
+
+
+def resolve(pr: str, repo_flag: str | None) -> tuple[str, str, int]:
+    m = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr)
+    if m:
+        return m.group(1), m.group(2), int(m.group(3))
+    if not pr.isdigit():
+        sys.exit(f"error: not a PR URL or number: {pr}")
+    repo = repo_flag or current_repo()
+    owner, name = repo.split("/", 1)
+    return owner, name, int(pr)
+
+
+def current_repo() -> str:
+    out = gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+    return out.strip()
+
+
+def render(owner: str, repo: str, number: int) -> str:
+    base = f"/repos/{owner}/{repo}"
+    pr = api(f"{base}/pulls/{number}")
+    issue_comments = api(f"{base}/issues/{number}/comments", paginate=True)
+    reviews = api(f"{base}/pulls/{number}/reviews", paginate=True)
+    review_comments = api(f"{base}/pulls/{number}/comments", paginate=True)
+
+    out: list[str] = []
+    out.append(f"# {pr['title']} ([#{number}]({pr['html_url']}))")
+    out.append("")
+    out.append(
+        f"*{pr['user']['login']} · {pr['state']} · "
+        f"{pr['comments']} comments, {pr['review_comments']} review comments*"
+    )
+    out.append("")
+
+    for event in timeline(issue_comments, reviews, review_comments):
+        out.extend(event)
+        out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def timeline(issue_comments, reviews, review_comments) -> list[list[str]]:
+    threads = group_threads(review_comments)
+    events: list[tuple[str, list[str]]] = []
+
+    for c in issue_comments:
+        events.append((c["created_at"], issue_block(c)))
+
+    for r in reviews:
+        # Reviews with no body and no inline comments (a bare APPROVED etc.) are
+        # still meaningful; skip only the empty-body pending noise.
+        if not r.get("body") and r["state"] == "COMMENTED":
+            continue
+        events.append((r["submitted_at"] or "", review_block(r)))
+
+    for root in threads:
+        events.append((root[0]["created_at"], thread_block(root)))
+
+    events.sort(key=lambda e: e[0])
+    return [block for _, block in events]
+
+
+def group_threads(review_comments) -> list[list[dict]]:
+    """Group inline comments into reply chains, keyed by the root comment id."""
+    by_id = {c["id"]: c for c in review_comments}
+    children: dict[int, list[dict]] = {}
+    roots: list[dict] = []
+    for c in review_comments:
+        parent = c.get("in_reply_to_id")
+        if parent and parent in by_id:
+            children.setdefault(parent, []).append(c)
+        else:
+            roots.append(c)
+
+    def chain(c: dict) -> list[dict]:
+        result = [c]
+        for kid in sorted(children.get(c["id"], []), key=lambda x: x["created_at"]):
+            result.extend(chain(kid))
+        return result
+
+    return [chain(r) for r in sorted(roots, key=lambda x: x["created_at"])]
+
+
+def issue_block(c: dict) -> list[str]:
+    return [f"### 💬 {c['user']['login']} — {when(c['created_at'])}", "", *body(c)]
+
+
+def review_block(r: dict) -> list[str]:
+    state = REVIEW_STATE.get(r["state"], r["state"])
+    header = f"### {state} · {r['user']['login']} — {when(r['submitted_at'])}"
+    return [header, "", *body(r)] if r.get("body") else [header]
+
+
+def thread_block(chain: list[dict]) -> list[str]:
+    root = chain[0]
+    loc = root.get("path", "")
+    line = root.get("line") or root.get("original_line")
+    if line:
+        loc += f":{line}"
+    out = [f"### 📌 `{loc}`", ""]
+    if root.get("diff_hunk"):
+        out += ["```diff", *root["diff_hunk"].splitlines(), "```", ""]
+    for c in chain:
+        out.append(f"**{c['user']['login']}** — {when(c['created_at'])}")
+        out.append("")
+        out += body(c)
+        out.append("")
+    return out[:-1]
+
+
+def body(c: dict) -> list[str]:
+    text: str = (c.get("body") or "").strip()
+    return text.splitlines() if text else ["*(no text)*"]
+
+
+def when(ts: str) -> str:
+    if not ts:
+        return "?"
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+
+
+def api(path: str, paginate: bool = False) -> Any:
+    if not paginate:
+        return json.loads(gh(["api", path]))
+    # --paginate concatenates page arrays into invalid JSON; --slurp wraps the
+    # pages in an outer array, which we flatten back into a single list.
+    pages = json.loads(gh(["api", path, "--paginate", "--slurp"]))
+    return [item for page in pages for item in page]
+
+
+def gh(args: list[str]) -> str:
+    result = subprocess.run(
+        ["gh", *args], capture_output=True, text=True, timeout=30, check=False
+    )
+    if result.returncode != 0:
+        sys.exit(result.stderr.strip() or f"gh {' '.join(args)} failed")
+    return result.stdout
+
+
+if __name__ == "__main__":
+    sys.exit(main())
