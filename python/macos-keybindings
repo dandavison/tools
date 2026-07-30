@@ -337,9 +337,12 @@ def read_domain(domain: str, per_host: bool = False) -> dict | None:
 
 
 def combo_from_parameters(params: list) -> str:
-    """Decode a symbolic hotkey's [char, keycode, modifier-mask] triple."""
+    """Decode a symbolic hotkey's [char, keycode, modifier-mask] triple.
+
+    macOS omits the parameters when a hotkey sits at its built-in default, so an
+    absent combo means "enabled at Apple's default", not "no shortcut"."""
     if len(params) < 3:
-        return "(none)"
+        return "(default)"
     char, code, mask = params[0], params[1], params[2]
     parts = [name for bit, name in MODIFIERS if isinstance(mask, int) and mask & bit]
     parts.append(key_name(char, code))
