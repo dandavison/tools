@@ -160,6 +160,20 @@ KEY_CODES = {
     126: "up",
 }
 
+# HID usage IDs used by the Modifier Keys pane (page 0x07 keyboard, 0xFF vendor).
+HID_KEYS = {
+    0x700000039: "caps lock",
+    0x7000000E0: "left control",
+    0x7000000E1: "left shift",
+    0x7000000E2: "left option",
+    0x7000000E3: "left command",
+    0x7000000E4: "right control",
+    0x7000000E5: "right shift",
+    0x7000000E6: "right option",
+    0x7000000E7: "right command",
+    0xFF00000003: "fn",
+}
+
 # Only IDs whose meaning is well established are named; the rest print as
 # "unknown" rather than risk a confident-sounding guess.
 SYMBOLIC_HOTKEYS = {
@@ -190,7 +204,9 @@ def main() -> int:
     if sys.platform != "darwin":
         sys.exit("macos-keybindings: macOS only")
 
-    bindings = system_hotkeys() + app_overrides() + service_shortcuts()
+    bindings = (
+        system_hotkeys() + modifier_remaps() + app_overrides() + service_shortcuts()
+    )
     if not args.all:
         bindings = [b for b in bindings if b["enabled"]]
     if args.key:
@@ -224,6 +240,33 @@ def system_hotkeys() -> list[dict]:
             }
         )
     return out
+
+
+def modifier_remaps() -> list[dict]:
+    """System Settings > Keyboard > Modifier Keys, which lives outside the
+    symbolic hotkeys and would otherwise hide a remapped control or caps lock."""
+    mapping = read_domain("com.apple.keyboard.modifiermapping", per_host=True) or {}
+    out = []
+    for device, remaps in mapping.items():
+        for remap in remaps if isinstance(remaps, list) else []:
+            src = remap.get("HIDKeyboardModifierMappingSrc")
+            dst = remap.get("HIDKeyboardModifierMappingDst")
+            if src is None or src == dst:
+                continue
+            out.append(
+                {
+                    "source": "modifiers",
+                    "name": f"{hid_key(src)} acts as {hid_key(dst)}",
+                    "combo": hid_key(src),
+                    "enabled": True,
+                    "owner": str(device),
+                }
+            )
+    return out
+
+
+def hid_key(usage: int) -> str:
+    return HID_KEYS.get(usage, "no action" if usage == -1 else f"usage {usage:#x}")
 
 
 def app_overrides() -> list[dict]:
@@ -268,8 +311,9 @@ def service_shortcuts() -> list[dict]:
     return out
 
 
-def read_domain(domain: str) -> dict | None:
-    r = subprocess.run(["defaults", "export", domain, "-"], capture_output=True)
+def read_domain(domain: str, per_host: bool = False) -> dict | None:
+    host = ["-currentHost"] if per_host else []
+    r = subprocess.run(["defaults", *host, "export", domain, "-"], capture_output=True)
     if r.returncode != 0 or not r.stdout:
         return None
     try:
