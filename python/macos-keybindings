@@ -5,7 +5,7 @@ Reads the actual preference stores the system uses, so nothing has to be found
 by clicking around System Settings:
 
     system    System Settings > Keyboard > Keyboard Shortcuts (symbolic hotkeys)
-    app       Per-app menu overrides (NSUserKeyEquivalents in every defaults domain)
+    app       Per-app menu overrides (NSUserKeyEquivalents in ~/Library/Preferences)
     services  Services menu shortcuts (pbs)
 
 Two things are deliberately absent, and both matter when hunting a swallowed key:
@@ -29,8 +29,9 @@ Usage:
 from __future__ import annotations  # system python is still 3.9 on a fresh Mac
 
 import argparse
-import concurrent.futures
+import glob
 import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -270,26 +271,31 @@ def hid_key(usage: int) -> str:
 
 
 def app_overrides() -> list[dict]:
-    """Per-app menu shortcut overrides, one defaults domain at a time."""
-    domains = ["NSGlobalDomain"] + subprocess.run(
-        ["defaults", "domains"], capture_output=True, text=True
-    ).stdout.strip().split(", ")
+    """Per-app menu shortcut overrides, read straight from the plists in
+    ~/Library/Preferences. Reading these files directly avoids the per-app TCC
+    prompts that `defaults export` triggers when it reaches into sandboxed app
+    containers; the tradeoff is that sandboxed apps' menu overrides (which are
+    not global hotkeys and so cannot swallow a key) are not seen."""
+    prefs = os.path.expanduser("~/Library/Preferences")
+    paths = glob.glob(os.path.join(prefs, "*.plist"))
+    paths.append(os.path.join(prefs, ".GlobalPreferences.plist"))
 
     out = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        for domain, data in zip(domains, pool.map(read_domain, domains)):
-            for menu_item, key in (
-                (data or {}).get("NSUserKeyEquivalents") or {}
-            ).items():
-                out.append(
-                    {
-                        "source": "app",
-                        "name": menu_item,
-                        "combo": combo_from_cocoa(key),
-                        "enabled": True,
-                        "owner": domain,
-                    }
-                )
+    for path in paths:
+        equivs = (read_plist_file(path) or {}).get("NSUserKeyEquivalents")
+        if not isinstance(equivs, dict):
+            continue
+        domain = os.path.splitext(os.path.basename(path))[0]
+        for menu_item, key in equivs.items():
+            out.append(
+                {
+                    "source": "app",
+                    "name": menu_item,
+                    "combo": combo_from_cocoa(key),
+                    "enabled": True,
+                    "owner": domain,
+                }
+            )
     return out
 
 
@@ -309,6 +315,14 @@ def service_shortcuts() -> list[dict]:
                 }
             )
     return out
+
+
+def read_plist_file(path: str) -> dict | None:
+    try:
+        with open(path, "rb") as f:
+            return plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
 
 
 def read_domain(domain: str, per_host: bool = False) -> dict | None:
