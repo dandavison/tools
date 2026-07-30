@@ -5,7 +5,7 @@ export PATH="$HOME/bin:/opt/homebrew/bin:$PATH"
 
 pick() {
     local app
-    app="$(command fd -d 1 '.+\.app' /Applications ~/Applications/Chrome\ Apps.localized/ |
+    app="$(command fd -d 1 '.+\.app' /Applications /System/Applications ~/Applications/Chrome\ Apps.localized/ |
         rg -r '$2$1' '^(.*/([^/]+)\.app)/?$' |
         fzf --with-nth 1 -d / |
         sed -E 's,[^/]+/,/,')"
