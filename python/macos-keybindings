@@ -26,6 +26,8 @@ Usage:
     macos-keybindings --json           # machine-readable, for diffing two hosts
 """
 
+from __future__ import annotations  # system python is still 3.9 on a fresh Mac
+
 import argparse
 import concurrent.futures
 import json
