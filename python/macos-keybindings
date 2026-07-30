@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Dump every keyboard shortcut macOS itself has registered.
+
+Reads the actual preference stores the system uses, so nothing has to be found
+by clicking around System Settings:
+
+    system    System Settings > Keyboard > Keyboard Shortcuts (symbolic hotkeys)
+    app       Per-app menu overrides (NSUserKeyEquivalents in every defaults domain)
+    services  Services menu shortcuts (pbs)
+
+Two things are deliberately absent, and both matter when hunting a swallowed key:
+
+  * A macOS default that has never been customised is not stored anywhere, so it
+    does not appear here. Absence means "never touched", not "not bound".
+  * Shortcuts a running app registers privately -- Carbon RegisterEventHotKey or
+    an NSEvent global monitor, as used by Karabiner, Hammerspoon, Raycast and
+    friends -- live in no preference file and cannot be enumerated at all.
+
+So when a key disappears and nothing listed here claims it, an app-private
+global hotkey is what is left to suspect.
+
+Usage:
+    macos-keybindings                  # enabled shortcuts, grouped by source
+    macos-keybindings --all            # include disabled ones
+    macos-keybindings --key space      # only combos matching a substring
+    macos-keybindings --json           # machine-readable, for diffing two hosts
+"""
+
+import argparse
+import concurrent.futures
+import json
+import plistlib
+import subprocess
+import sys
+
+MODIFIERS = [(1 << 17, "shift"), (1 << 18, "ctrl"), (1 << 19, "opt"), (1 << 20, "cmd")]
+
+# NSUserKeyEquivalents / Services encode modifiers as a prefix on the key.
+COCOA_MODIFIERS = {"@": "cmd", "~": "opt", "^": "ctrl", "$": "shift"}
+
+# Cocoa spells non-typing keys as control characters or private-use codepoints.
+COCOA_KEYS = {
+    "\x03": "enter",
+    "\x08": "backspace",
+    "\t": "tab",
+    "\r": "return",
+    "\x1b": "escape",
+    "\x7f": "delete",
+    " ": "space",
+    "": "up",
+    "": "down",
+    "": "left",
+    "": "right",
+    "": "forwarddelete",
+    "": "home",
+    "": "end",
+    "": "pageup",
+    "": "pagedown",
+    "": "clear",
+    **{chr(0xF704 + n): f"f{n + 1}" for n in range(24)},
+}
+
+KEY_CODES = {
+    0: "a",
+    1: "s",
+    2: "d",
+    3: "f",
+    4: "h",
+    5: "g",
+    6: "z",
+    7: "x",
+    8: "c",
+    9: "v",
+    11: "b",
+    12: "q",
+    13: "w",
+    14: "e",
+    15: "r",
+    16: "y",
+    17: "t",
+    18: "1",
+    19: "2",
+    20: "3",
+    21: "4",
+    22: "6",
+    23: "5",
+    24: "=",
+    25: "9",
+    26: "7",
+    27: "-",
+    28: "8",
+    29: "0",
+    30: "]",
+    31: "o",
+    32: "u",
+    33: "[",
+    34: "i",
+    35: "p",
+    36: "return",
+    37: "l",
+    38: "j",
+    39: "'",
+    40: "k",
+    41: ";",
+    42: "\\",
+    43: ",",
+    44: "/",
+    45: "n",
+    46: "m",
+    47: ".",
+    48: "tab",
+    49: "space",
+    50: "`",
+    51: "delete",
+    53: "escape",
+    65: "keypad.",
+    67: "keypad*",
+    69: "keypad+",
+    71: "clear",
+    75: "keypad/",
+    76: "keypadenter",
+    78: "keypad-",
+    81: "keypad=",
+    82: "keypad0",
+    83: "keypad1",
+    84: "keypad2",
+    85: "keypad3",
+    86: "keypad4",
+    87: "keypad5",
+    88: "keypad6",
+    89: "keypad7",
+    91: "keypad8",
+    92: "keypad9",
+    96: "f5",
+    97: "f6",
+    98: "f7",
+    99: "f3",
+    100: "f8",
+    101: "f9",
+    103: "f11",
+    105: "f13",
+    107: "f14",
+    109: "f10",
+    111: "f12",
+    113: "f15",
+    114: "help",
+    115: "home",
+    116: "pageup",
+    117: "forwarddelete",
+    118: "f4",
+    119: "end",
+    120: "f2",
+    121: "pagedown",
+    122: "f1",
+    123: "left",
+    124: "right",
+    125: "down",
+    126: "up",
+}
+
+# Only IDs whose meaning is well established are named; the rest print as
+# "unknown" rather than risk a confident-sounding guess.
+SYMBOLIC_HOTKEYS = {
+    28: "Save picture of screen as a file",
+    29: "Copy picture of screen to clipboard",
+    30: "Save picture of selected area as a file",
+    31: "Copy picture of selected area to clipboard",
+    32: "Mission Control",
+    33: "Application windows",
+    60: "Select the previous input source",
+    61: "Select next source in input menu",
+    64: "Show Spotlight search",
+    65: "Show Finder search window",
+    79: "Move left a space",
+    81: "Move right a space",
+    98: "Show Help menu",
+    184: "Screenshot and recording options",
+}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--all", action="store_true", help="include disabled shortcuts")
+    p.add_argument("--key", help="only show combos containing this substring")
+    p.add_argument("--json", action="store_true", help="emit JSON")
+    args = p.parse_args()
+
+    if sys.platform != "darwin":
+        sys.exit("macos-keybindings: macOS only")
+
+    bindings = system_hotkeys() + app_overrides() + service_shortcuts()
+    if not args.all:
+        bindings = [b for b in bindings if b["enabled"]]
+    if args.key:
+        bindings = [b for b in bindings if args.key.lower() in b["combo"].lower()]
+    bindings.sort(key=lambda b: (b["source"], b["combo"], b["name"]))
+
+    if args.json:
+        json.dump(bindings, sys.stdout, indent=2, sort_keys=True)
+        print()
+    else:
+        report(bindings)
+    return 0
+
+
+def system_hotkeys() -> list[dict]:
+    hotkeys = (read_domain("com.apple.symbolichotkeys") or {}).get(
+        "AppleSymbolicHotKeys", {}
+    )
+    out = []
+    for key, entry in hotkeys.items():
+        if not isinstance(entry, dict):
+            continue
+        params = (entry.get("value") or {}).get("parameters") or []
+        out.append(
+            {
+                "source": "system",
+                "name": SYMBOLIC_HOTKEYS.get(int(key), f"unknown (id {key})"),
+                "combo": combo_from_parameters(params),
+                "enabled": bool(entry.get("enabled")),
+                "owner": f"symbolichotkey {key}",
+            }
+        )
+    return out
+
+
+def app_overrides() -> list[dict]:
+    """Per-app menu shortcut overrides, one defaults domain at a time."""
+    domains = ["NSGlobalDomain"] + subprocess.run(
+        ["defaults", "domains"], capture_output=True, text=True
+    ).stdout.strip().split(", ")
+
+    out = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        for domain, data in zip(domains, pool.map(read_domain, domains)):
+            for menu_item, key in (
+                (data or {}).get("NSUserKeyEquivalents") or {}
+            ).items():
+                out.append(
+                    {
+                        "source": "app",
+                        "name": menu_item,
+                        "combo": combo_from_cocoa(key),
+                        "enabled": True,
+                        "owner": domain,
+                    }
+                )
+    return out
+
+
+def service_shortcuts() -> list[dict]:
+    services = (read_domain("pbs") or {}).get("NSServicesStatus", {}) or {}
+    out = []
+    for name, status in services.items():
+        key = (status or {}).get("key_equivalent")
+        if key:
+            out.append(
+                {
+                    "source": "services",
+                    "name": name.split(" - ")[-1],
+                    "combo": combo_from_cocoa(key),
+                    "enabled": True,
+                    "owner": "pbs",
+                }
+            )
+    return out
+
+
+def read_domain(domain: str) -> dict | None:
+    r = subprocess.run(["defaults", "export", domain, "-"], capture_output=True)
+    if r.returncode != 0 or not r.stdout:
+        return None
+    try:
+        return plistlib.loads(r.stdout)
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+
+
+def combo_from_parameters(params: list) -> str:
+    """Decode a symbolic hotkey's [char, keycode, modifier-mask] triple."""
+    if len(params) < 3:
+        return "(none)"
+    char, code, mask = params[0], params[1], params[2]
+    parts = [name for bit, name in MODIFIERS if isinstance(mask, int) and mask & bit]
+    parts.append(key_name(char, code))
+    return "+".join(parts)
+
+
+def key_name(char: int, code: int) -> str:
+    if code in KEY_CODES:
+        return KEY_CODES[code]
+    if isinstance(char, int) and 32 <= char < 0xFFFF:
+        return chr(char)
+    return f"keycode{code}"
+
+
+def combo_from_cocoa(key: str) -> str:
+    """Decode "@~q" style shortcuts; cmd is implicit in menu equivalents."""
+    parts = []
+    while key and key[0] in COCOA_MODIFIERS:
+        parts.append(COCOA_MODIFIERS[key[0]])
+        key = key[1:]
+    if "cmd" not in parts:
+        parts.append("cmd")
+    parts.append(cocoa_key_name(key))
+    order = {"ctrl": 0, "opt": 1, "shift": 2, "cmd": 3}
+    return "+".join(sorted(parts[:-1], key=lambda m: order.get(m, 9)) + parts[-1:])
+
+
+def cocoa_key_name(key: str) -> str:
+    """Name the key, spelling anything unprintable as a codepoint rather than
+    emitting an invisible character (apps such as Chrome use private encodings)."""
+    if not key:
+        return "(unset)"
+    if key in COCOA_KEYS:
+        return COCOA_KEYS[key]
+    if key.isprintable():
+        return key.lower()
+    return "+".join(f"U+{ord(c):04X}" for c in key)
+
+
+def report(bindings: list[dict]) -> None:
+    if not bindings:
+        print("no matching shortcuts")
+        return
+    width = max(len(b["combo"]) for b in bindings)
+    source = None
+    for b in bindings:
+        if b["source"] != source:
+            source = b["source"]
+            print(f"\n{source}")
+        state = "" if b["enabled"] else "  [disabled]"
+        print(f"  {b['combo']:<{width}}  {b['name']}  ({b['owner']}){state}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
