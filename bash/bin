@@ -5,9 +5,11 @@ die() {
     echo "$1" 1>&2
     exit 1
 }
-rel_path="$1"
-[ -f "$rel_path" ] || die "error: $rel_path is not a file"
-if [ ! -x "$rel_path" ]; then
-    chmod +x "$rel_path"
-fi
-ln -fs "$(readlink -f "$rel_path")" ~/bin/"$2"
+[ $# -gt 0 ] || die "usage: bin FILE..."
+for rel_path in "$@"; do
+    [ -f "$rel_path" ] || die "error: $rel_path is not a file"
+    if [ ! -x "$rel_path" ]; then
+        chmod +x "$rel_path"
+    fi
+    ln -fs "$(readlink -f "$rel_path")" ~/bin/"$(basename "$rel_path")"
+done
