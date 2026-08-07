@@ -1,3 +1,3 @@
 #!/bin/bash
 
-claude --allowedTools=Bash --dangerously-skip-permissions --print "$@"
+claude --model sonnet --allowedTools=Bash --dangerously-skip-permissions --print "$@"
