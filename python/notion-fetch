@@ -154,9 +154,9 @@ def markdown_from_zip(data: bytes) -> str:
 def comments_markdown(page_id: str, token: str) -> str:
     """Notion's export omits comments; fetch them from the private record API.
 
-    ``loadPageChunk`` returns the page's ``comment``, ``discussion``, and
-    ``notion_user`` records inline. A comment's ``parent_id`` is its discussion;
-    a discussion's ``parent_id`` is the block it annotates (or the page itself).
+    Page chunks return ``comment``, ``discussion``, and ``notion_user`` records
+    inline. A comment's ``parent_id`` is its discussion; a discussion's
+    ``parent_id`` is the block it annotates (or the page itself).
     """
     records = load_page_records(page_id, token)
     comments = records.get("comment", {})
@@ -219,16 +219,40 @@ def load_page_records(page_id: str, token: str) -> dict[str, dict[str, Any]]:
             },
             token,
         )
-        for table, recs in (resp.get("recordMap") or {}).items():
-            if not isinstance(recs, dict):
-                continue  # e.g. __version__
-            for rid, rec in recs.items():
-                value = unwrap(rec)
-                if value:
-                    tables[table][rid] = value
+        merge_record_map(tables, resp.get("recordMap"))
         cursor = resp.get("cursor") or {}
         if not cursor.get("stack"):
-            return tables
+            break
+
+    requests = descendant_chunk_requests(tables.get("block", {}), page_id)
+    if requests:
+        resp = api_post("loadCachedPageChunks", {"requests": requests}, token)
+        merge_record_map(tables, resp.get("recordMap"))
+    return tables
+
+
+def descendant_chunk_requests(
+    blocks: dict[str, Any], root: str
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "page": {"id": block_id, "spaceId": blocks[block_id]["space_id"]},
+            "cursor": {"stack": []},
+            "verticalColumns": False,
+        }
+        for block_id in block_order(blocks, root)
+        if block_id != root and (blocks[block_id].get("format") or {}).get("toggleable")
+    ]
+
+
+def merge_record_map(tables: dict[str, dict[str, Any]], record_map: Any) -> None:
+    for table, recs in (record_map or {}).items():
+        if not isinstance(recs, dict):
+            continue
+        for rid, rec in recs.items():
+            value = unwrap(rec)
+            if value:
+                tables[table][rid] = value
 
 
 def unwrap(rec: Any) -> dict[str, Any] | None:
