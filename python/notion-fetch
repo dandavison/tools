@@ -22,14 +22,17 @@ macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
 """
 
 import argparse
+import csv
 import datetime
 import io
 import json
 import os
+import posixpath
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -146,9 +149,56 @@ def markdown_from_zip(data: bytes) -> str:
     names = sorted(n for n in zf.namelist() if n.lower().endswith(".md"))
     if not names:
         die(f"no markdown in export zip (entries: {zf.namelist()[:10]})")
-    if len(names) == 1:
-        return zf.read(names[0]).decode("utf-8")
-    return "\n\n\n".join(f"<!-- {n} -->\n\n{zf.read(n).decode('utf-8')}" for n in names)
+    docs = [inline_databases(zf, n) for n in names]
+    if len(docs) == 1:
+        return docs[0]
+    return "\n\n\n".join(f"<!-- {n} -->\n\n{d}" for n, d in zip(names, docs))
+
+
+def inline_databases(zf: zipfile.ZipFile, md_name: str) -> str:
+    """Notion exports each database as a sibling CSV that the Markdown merely
+    links to; splice the rows in at the link site so the export stands alone."""
+
+    def splice(match: re.Match[str]) -> str:
+        title, href = match.group(1), match.group(2)
+        path = posixpath.normpath(
+            posixpath.join(posixpath.dirname(md_name), urllib.parse.unquote(href))
+        )
+        rows = list(csv.reader(io.StringIO(zf.read(path).decode("utf-8-sig"))))
+        heading = f"### {title}\n\n" if title and title != "Untitled" else ""
+        return heading + render_rows(rows)
+
+    md = zf.read(md_name).decode("utf-8")
+    return re.sub(r"\[([^\]]*)\]\(([^)]+\.csv)\)", splice, md)
+
+
+def render_rows(rows: list[list[str]]) -> str:
+    """Render database rows as titled field lists. Notion databases are wide and
+    prose-filled, which Markdown tables render unreadably."""
+    if not rows:
+        return ""
+    header, body = rows[0], rows[1:]
+    out: list[str] = []
+    for row in body:
+        title = row[0].strip() if row else ""
+        fields = [(h, v.strip()) for h, v in zip(header[1:], row[1:]) if v.strip()]
+        if not title and not fields:
+            continue
+        if title:
+            out.append(f"**{one_line(title)}**")
+        out.extend(f"- **{h}**: {indented(v)}" for h, v in fields)
+        out.append("")
+    return "\n".join(out)
+
+
+def one_line(value: str) -> str:
+    return re.sub(r"\s*\n\s*", " ", value.strip())
+
+
+def indented(value: str) -> str:
+    """Cell text spanning several Notion blocks becomes indented paragraphs so it
+    stays inside its bullet."""
+    return "\n\n  ".join(line.strip() for line in value.splitlines() if line.strip())
 
 
 def comments_markdown(page_id: str, token: str) -> str:
