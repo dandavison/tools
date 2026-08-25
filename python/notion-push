@@ -1,0 +1,335 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pycookiecheat>=0.8"]
+# ///
+"""Create a Notion page from Markdown on stdin, with no LLM in the loop.
+
+Reads your Chrome `token_v2` session cookie (via pycookiecheat), creates an empty
+subpage of the parent page, and hands the Markdown to Notion's private import API
+(getUploadFileUrl/enqueueTask importFile), so Notion itself does the
+Markdown-to-blocks conversion. This is the same conversion as the "Import >
+Markdown" menu item, and the inverse of notion-fetch.
+
+Usage:
+  gh-issue-to-md 42 | notion-push [--parent <notion-url>] [--title TITLE]
+
+Prints the new page's URL. The title comes from --title, else the YAML
+frontmatter `title`, else the first H1; frontmatter is dropped, as is a leading
+H1 that supplied the title (Notion titles the page from the uploaded filename).
+
+Requires being logged into Notion in Chrome. The first run triggers a one-time
+macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Any, NoReturn
+
+from pycookiecheat import chrome_cookies
+
+API = "https://www.notion.so/api/v3"
+DEFAULT_PARENT = "https://www.notion.so/3c78fc567738803cb9d0f10ffeadfdbd"
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Create a Notion page from Markdown on stdin."
+    )
+    ap.add_argument("--parent", default=DEFAULT_PARENT, help="parent Notion page URL")
+    ap.add_argument(
+        "--title", help="page title (default: from frontmatter or first H1)"
+    )
+    ap.add_argument(
+        "--profile", help='Chrome profile, e.g. "Profile 1" (default: Default)'
+    )
+    ap.add_argument("--timeout", type=int, default=180, help="import wait, seconds")
+    args = ap.parse_args()
+
+    markdown = sys.stdin.read()
+    if not markdown.strip():
+        die("no markdown on stdin")
+    title, body = title_and_body(markdown, args.title)
+
+    token = notion_cookies(args.profile)["token_v2"]
+    parent_id = extract_block_id(args.parent)
+    space_id = space_of(parent_id, token)
+    page_id = create_empty_subpage(parent_id, space_id, token)
+    log(f"created page {page_id} under {parent_id}")
+    import_markdown(page_id, space_id, title, body.encode(), token, args.timeout)
+    print(page_url(page_id))
+    return 0
+
+
+def title_and_body(markdown: str, override: str | None) -> tuple[str, str]:
+    frontmatter, body = split_frontmatter(markdown)
+    title = override or frontmatter.get("title") or first_heading(body) or "Untitled"
+    return title, strip_leading_heading(body, title)
+
+
+def split_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
+    if not markdown.startswith("---\n"):
+        return {}, markdown
+    end = markdown.find("\n---\n", 3)
+    if end == -1:
+        return {}, markdown
+    fields = {}
+    for line in markdown[4:end].splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = unquote(value.strip())
+    return fields, markdown[end + 5 :].lstrip("\n")
+
+
+def unquote(value: str) -> str:
+    if value[:1] not in ('"', "'"):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value.strip("\"'")
+
+
+def first_heading(body: str) -> str | None:
+    match = re.match(r"\s*#\s+(.+)", body)
+    return match.group(1).strip() if match else None
+
+
+def strip_leading_heading(body: str, title: str) -> str:
+    """Notion takes the page title from the uploaded filename, so a leading H1
+    that says the same thing would render as a duplicate."""
+    match = re.match(r"\s*#\s+(.+)\n?", body)
+    if match and match.group(1).strip() == title:
+        return body[match.end() :].lstrip("\n")
+    return body
+
+
+def notion_cookies(profile: str | None) -> dict[str, str]:
+    cookie_file = None
+    if profile:
+        cookie_file = (
+            Path.home()
+            / "Library/Application Support/Google/Chrome"
+            / profile
+            / "Cookies"
+        )
+    cookies = chrome_cookies("https://www.notion.so", cookie_file=cookie_file)
+    if not cookies.get("token_v2"):
+        die(
+            "no token_v2 cookie for www.notion.so; log into Notion in Chrome"
+            + (f" ({profile})" if profile else "")
+        )
+    return cookies
+
+
+def extract_block_id(url: str) -> str:
+    ids = UUID_RE.findall(url.split("#", 1)[0])
+    if not ids:
+        die(f"no page id found in URL: {url}")
+    raw = ids[-1].replace("-", "").lower()
+    return f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
+
+
+def space_of(block_id: str, token: str) -> str:
+    resp = api_post(
+        "syncRecordValues",
+        {"requests": [{"pointer": {"table": "block", "id": block_id}, "version": -1}]},
+        token,
+    )
+    block = unwrap(((resp.get("recordMap") or {}).get("block") or {}).get(block_id))
+    if not block:
+        die(f"parent page not found (or not visible to you): {block_id}")
+    return block["space_id"]
+
+
+def unwrap(rec: Any) -> dict[str, Any] | None:
+    """Peel record wrappers ({spaceId/value/role: ...}) down to the record itself,
+    which is the first nested dict carrying an ``id``."""
+    while (
+        isinstance(rec, dict) and "id" not in rec and isinstance(rec.get("value"), dict)
+    ):
+        rec = rec["value"]
+    return rec if isinstance(rec, dict) and "id" in rec else None
+
+
+def create_empty_subpage(parent_id: str, space_id: str, token: str) -> str:
+    """The importer writes into a block that already exists, so make an empty one."""
+    page_id = str(uuid.uuid4())
+    pointer = {"table": "block", "id": page_id, "spaceId": space_id}
+    api_post(
+        "saveTransactions",
+        {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "spaceId": space_id,
+                    "operations": [
+                        {
+                            "pointer": pointer,
+                            "path": [],
+                            "command": "set",
+                            "args": {"type": "page", "id": page_id, "version": 1},
+                        },
+                        {
+                            "pointer": pointer,
+                            "path": [],
+                            "command": "update",
+                            "args": {
+                                "parent_id": parent_id,
+                                "parent_table": "block",
+                                "alive": True,
+                            },
+                        },
+                        {
+                            "pointer": {
+                                "table": "block",
+                                "id": parent_id,
+                                "spaceId": space_id,
+                            },
+                            "path": ["content"],
+                            "command": "listAfter",
+                            "args": {"id": page_id},
+                        },
+                    ],
+                }
+            ],
+        },
+        token,
+    )
+    return page_id
+
+
+def import_markdown(
+    page_id: str, space_id: str, title: str, data: bytes, token: str, timeout_s: int
+) -> None:
+    file_name = f"{file_stem(title)}.md"
+    upload = api_post(
+        "getUploadFileUrl",
+        {
+            "bucket": "temporary",
+            "name": file_name,
+            "contentType": "text/markdown",
+            "record": {"table": "block", "id": page_id, "spaceId": space_id},
+        },
+        token,
+    )
+    put(upload["signedPutUrl"], data, upload.get("putHeaders") or {})
+    task_id = api_post(
+        "enqueueTask",
+        {
+            "task": {
+                "eventName": "importFile",
+                "request": {
+                    "importType": "ReplaceBlock",
+                    "fileURL": upload["url"],
+                    "fileName": file_name,
+                    "signedToken": upload["signedToken"],
+                    "block": {"id": page_id, "spaceId": space_id},
+                    "spaceId": space_id,
+                    "userTimeZone": local_timezone(),
+                    "flowId": str(uuid.uuid4()),
+                    "importId": str(uuid.uuid4()),
+                    "importInstanceId": str(uuid.uuid4()),
+                    "importEntryPoint": "modal",
+                },
+            }
+        },
+        token,
+    )["taskId"]
+    log(f"import task {task_id} enqueued for {file_name}")
+    poll_import(task_id, page_id, token, timeout_s)
+
+
+def file_stem(title: str) -> str:
+    """The filename becomes the page title, and also an S3 object key."""
+    return re.sub(r"[\\/\s]+", " ", title).strip() or "Untitled"
+
+
+def put(url: str, data: bytes, headers: dict[str, str]) -> None:
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "text/markdown", **headers},
+        method="PUT",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        if resp.status != 200:
+            die(f"upload failed: {resp.status}")
+
+
+def poll_import(task_id: str, page_id: str, token: str, timeout_s: int) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        results = (
+            api_post("getTasks", {"taskIds": [task_id]}, token).get("results") or []
+        )
+        if not results:
+            die(f"task {task_id} not found")
+        task = results[0]
+        state = task.get("state")
+        if state == "success":
+            return
+        if state == "failure":
+            die(
+                f"import failed: {json.dumps(task.get('error') or task.get('status'))}"
+                f" (empty page left at {page_url(page_id)})"
+            )
+        log(f"  state={state}")
+        time.sleep(2)
+    die(f"import timed out after {timeout_s}s")
+
+
+def page_url(page_id: str) -> str:
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def api_post(path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+    req = urllib.request.Request(
+        f"{API}/{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Cookie": f"token_v2={token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        die(
+            f"POST {path} -> {e.code} {e.reason}: {e.read().decode(errors='replace')[:500]}"
+        )
+
+
+def local_timezone() -> str:
+    link = Path("/etc/localtime")
+    if link.is_symlink():
+        target = os.readlink(link)
+        if "zoneinfo/" in target:
+            return target.split("zoneinfo/", 1)[1]
+    return "UTC"
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def die(msg: str) -> NoReturn:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
