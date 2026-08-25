@@ -33,7 +33,6 @@ issue=$(gh api "$api_path")
 title=$(echo "$issue" | jq -r '.title')
 title_yaml=$(echo "$issue" | jq '.title')
 body=$(echo "$issue" | jq -r '.body // ""')
-author=$(echo "$issue" | jq -r '.user.login')
 created_at=$(echo "$issue" | jq -r '.created_at')
 date="${created_at%%T*}"
 
@@ -47,8 +46,6 @@ echo
 
 # Output issue title and body
 echo "# $title"
-echo
-echo "*Issue by @$author on $created_at*"
 echo
 if [[ -n "$body" && "$body" != "null" ]]; then
     echo "$body"
