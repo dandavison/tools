@@ -1,0 +1,10 @@
+#!/bin/bash
+# The remote-side name of the current branch, i.e. what GitHub calls the head branch.
+set -euo pipefail
+
+branch=$(git symbolic-ref --short HEAD)
+if ! merge=$(git config --get "branch.$branch.merge"); then
+    echo "$branch has no upstream: run \`git publish\`" 1>&2
+    exit 1
+fi
+echo "${merge#refs/heads/}"

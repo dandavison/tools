@@ -1,0 +1,16 @@
+#!/bin/bash
+# Push the current branch to origin under a personal prefix and track it.
+# Local branch names stay unprefixed; only the remote-side name carries the prefix.
+set -euo pipefail
+
+branch=$(git symbolic-ref --short HEAD)
+prefix=$(git config --default dan/ --get publish.prefix)
+
+git push -u origin "HEAD:refs/heads/$prefix$branch" "$@"
+
+# Without this, a later bare `git push` would target refs/heads/$branch, creating an
+# unprefixed duplicate rather than updating the upstream just established.
+if [[ $(git config --local --default '' --get push.default) != upstream ]]; then
+    git config --local push.default upstream
+    echo "Set push.default=upstream for this repo" 1>&2
+fi
