@@ -1,0 +1,168 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# ///
+"""Dump a Slack thread (or recent channel history) as readable Markdown.
+
+Wraps `agent-slack message list`, resolving user IDs to names, converting
+leftover Slack markup to Markdown, and rendering timestamps as local time
+with per-message permalinks.
+
+Usage:
+  slack-to-md <message-url>                 # a whole thread
+  slack-to-md '#team-eng-server' --limit 50 # recent channel history
+"""
+
+import argparse
+import html
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime
+from typing import Any, NoReturn
+
+MESSAGE_URL = re.compile(r"https://([^/]+)/archives/(C[A-Z0-9]+)/p(\d{10})(\d{6})")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("target", help="Slack message URL, #channel, or channel ID")
+    parser.add_argument("--limit", type=int, help="max messages (channel history mode)")
+    parser.add_argument("--workspace", help="workspace selector, if ambiguous")
+    args = parser.parse_args()
+
+    cmd = [
+        "agent-slack",
+        "message",
+        "list",
+        args.target,
+        "--resolve-users",
+        "--include-reactions",
+        "--max-body-chars",
+        "-1",
+    ]
+    if args.limit:
+        cmd += ["--limit", str(args.limit)]
+    if args.workspace:
+        cmd += ["--workspace", args.workspace]
+    data = json.loads(run(cmd))
+
+    messages = data.get("messages") or die(f"No messages at {args.target}")
+    users = data.get("referenced_users", {})
+    url_match = MESSAGE_URL.search(args.target)
+    host = url_match.group(1) if url_match else workspace_host()
+    channel_id = (
+        url_match.group(2)
+        if url_match
+        else data.get("channel_id") or messages[0].get("channel_id")
+    )
+    thread_ts = messages[0]["ts"] if url_match else None
+
+    print(header(args.target, messages, users, thread_ts, host, channel_id))
+    day = None
+    for message in messages:
+        when = datetime.fromtimestamp(float(message["ts"]))
+        if when.date() != day:
+            day = when.date()
+            print(f"### {day:%A %-d %B %Y}\n")
+        print(render(message, when, users, host, channel_id, thread_ts))
+
+
+def header(
+    target: str,
+    messages: list[dict[str, Any]],
+    users: dict[str, Any],
+    thread_ts: str | None,
+    host: str,
+    channel_id: str | None,
+) -> str:
+    if thread_ts:
+        title = f"Slack thread: {author(messages[0], users)}"
+        link = permalink(host, channel_id, thread_ts, None)
+    else:
+        title = f"Slack: {target}"
+        link = f"https://{host}/archives/{channel_id}"
+    return f"# {title}\n\n[{link}]({link})\n"
+
+
+def render(
+    message: dict[str, Any],
+    when: datetime,
+    users: dict[str, Any],
+    host: str,
+    channel_id: str | None,
+    thread_ts: str | None,
+) -> str:
+    link = permalink(host, channel_id, message["ts"], thread_ts)
+    lines = [f"**{author(message, users)}** · [{when:%H:%M}]({link})", ""]
+    if content := message.get("content"):
+        lines += [slackify(content, users), ""]
+    for file in message.get("files", []):
+        lines += [f"📎 {file['name']} — `{file.get('path', '')}`", ""]
+    if reactions := message.get("reactions"):
+        lines += [
+            " ".join(
+                f":{r['name']}: ({', '.join(name(users, u) for u in r.get('users', []))})"
+                for r in reactions
+            ),
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def author(message: dict[str, Any], users: dict[str, Any]) -> str:
+    who = message.get("author", {})
+    return name(users, who.get("user_id") or who.get("bot_id") or "unknown")
+
+
+def name(users: dict[str, Any], user_id: str) -> str:
+    user = users.get(user_id, {})
+    return (
+        user.get("real_name") or user.get("display_name") or user.get("name") or user_id
+    )
+
+
+def slackify(text: str, users: dict[str, Any]) -> str:
+    def expand(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if body.startswith("@"):
+            return "@" + name(users, body[1:].split("|")[0])
+        if body.startswith("#"):
+            channel, _, label = body[1:].partition("|")
+            return "#" + (label or channel)
+        if body.startswith("!"):
+            return "@" + body[1:].split("|")[0]
+        if body.startswith("mailto:"):
+            address, _, label = body.partition("|")
+            return label or address.removeprefix("mailto:")
+        target, _, label = body.partition("|")
+        return f"[{label}]({target})" if label else target
+
+    return html.unescape(re.sub(r"<([^<>\s][^<>]*)>", expand, text))
+
+
+def permalink(host: str, channel_id: str | None, ts: str, thread_ts: str | None) -> str:
+    url = f"https://{host}/archives/{channel_id}/p{ts.replace('.', '')}"
+    if thread_ts and thread_ts != ts:
+        url += f"?thread_ts={thread_ts}&cid={channel_id}"
+    return url
+
+
+def workspace_host() -> str:
+    return json.loads(run(["agent-slack", "auth", "test"]))["url"].split("/")[2]
+
+
+def run(cmd: list[str]) -> str:
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        die(result.stderr.strip() or f"{cmd[0]} failed")
+    return result.stdout
+
+
+def die(message: str) -> NoReturn:
+    sys.exit(f"slack-to-md: {message}")
+
+
+main()
