@@ -1,0 +1,637 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pycookiecheat>=0.8"]
+# ///
+"""Export a Notion page's version history as a git repository, with no LLM in the loop.
+
+Reads your Chrome `token_v2` session cookie (via pycookiecheat), lists the page's
+version-history snapshots (Notion's private getSnapshotsList/getSnapshotContents
+API, the same data behind the "Version history" menu item), renders each one to
+Markdown, and commits them in chronological order. The final commit is the page's
+current state.
+
+Usage:
+  notion-fetch-to-repo <notion-url> [--out DIR] [--limit N] [--profile "Profile 1"]
+
+Each commit is authored by the Notion user who made the edit and dated at the
+snapshot's timestamp, so `git log` and `git blame` work on the page's prose.
+Comments are rendered after the body, as they stood at that snapshot.
+
+Unlike notion-fetch, which delegates to Notion's own export, this renders Markdown
+from raw block records: Notion will only export a page's current version. So
+database rows are linked rather than inlined, and synced blocks and aliases appear
+as links.
+
+Requires being logged into Notion in Chrome. The first run triggers a one-time
+macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, NoReturn
+
+from pycookiecheat import chrome_cookies
+
+API = "https://www.notion.so/api/v3"
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.IGNORECASE
+)
+PAGE_FILE = "page.md"
+LIST_TYPES = {"bulleted_list", "numbered_list", "to_do", "toggle"}
+HEADINGS = {"header": "##", "sub_header": "###", "sub_sub_header": "####"}
+OPAQUE_TYPES = {"page", "table"}  # children belong to the block's own rendering
+CONTAINER_TYPES = {
+    "table_of_contents",
+    "breadcrumb",
+    "column_list",
+    "column",
+    "transclusion_container",
+}
+
+
+@dataclass
+class Revision:
+    """One page state to be committed, with the provenance of the edit."""
+
+    blocks: dict[str, Any]
+    discussions: dict[str, Any]
+    comments: dict[str, Any]
+    time_ms: int
+    author_ids: list[str]
+    label: str
+    users: dict[str, Any] = field(default_factory=dict)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Export a Notion page's version history as a git repository."
+    )
+    ap.add_argument("url", help="Notion page URL")
+    ap.add_argument("--out", help="output directory (default: page title slug)")
+    ap.add_argument("--limit", type=int, help="use only the N most recent snapshots")
+    ap.add_argument(
+        "--profile", help='Chrome profile, e.g. "Profile 1" (default: Default)'
+    )
+    ap.add_argument("--jobs", type=int, default=8, help="concurrent snapshot fetches")
+    args = ap.parse_args()
+
+    block_id = extract_block_id(args.url)
+    token = notion_cookies(args.profile)["token_v2"]
+
+    space_id = space_of(block_id, token)
+    snapshots = list_snapshots(block_id, space_id, token)
+    if args.limit:
+        snapshots = snapshots[-args.limit :]
+    log(f"{len(snapshots)} snapshots for block {block_id}")
+
+    revisions = fetch_snapshot_revisions(
+        block_id, space_id, snapshots, token, args.jobs
+    )
+    revisions.append(current_revision(block_id, token))
+    resolve_users(revisions, token)
+
+    out = Path(args.out) if args.out else Path(page_slug(revisions[-1], block_id))
+    build_repo(out, block_id, revisions)
+    print(out)
+    return 0
+
+
+def fetch_snapshot_revisions(
+    block_id: str,
+    space_id: str,
+    snapshots: list[dict[str, Any]],
+    token: str,
+    jobs: int,
+) -> list[Revision]:
+    def fetch(snapshot: dict[str, Any]) -> Revision | None:
+        contents = api_post(
+            "getSnapshotContents",
+            {
+                "blockId": block_id,
+                "timestamp": snapshot["timestamp"],
+                "spaceId": space_id,
+            },
+            token,
+        )["contentMap"]
+        blocks = plain_records(contents.get("block"))
+        if block_id not in blocks:
+            return None
+        return Revision(
+            blocks=blocks,
+            discussions=plain_records(contents.get("discussion")),
+            comments=plain_records(contents.get("comment")),
+            time_ms=int(snapshot["timestamp"]),
+            author_ids=[a["id"] for a in snapshot.get("authors") or []],
+            label=f"snapshot {snapshot['id']}",
+        )
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        fetched = list(pool.map(fetch, snapshots))
+    revisions = [rev for rev in fetched if rev]
+    log(f"fetched {len(revisions)} snapshots")
+    if len(revisions) < len(fetched):
+        # Notion keeps listing snapshots whose contents it has since discarded.
+        log(f"{len(fetched) - len(revisions)} snapshots have no retrievable content")
+    return revisions
+
+
+def current_revision(block_id: str, token: str) -> Revision:
+    tables = load_page_records(block_id, token)
+    root = unwrap(tables["block"].get(block_id)) or die(
+        f"block {block_id} not readable"
+    )
+    return Revision(
+        blocks=tables["block"],
+        discussions=tables.get("discussion", {}),
+        comments=tables.get("comment", {}),
+        time_ms=int(root.get("last_edited_time") or 0),
+        author_ids=[root["last_edited_by_id"]] if root.get("last_edited_by_id") else [],
+        label="current",
+    )
+
+
+def resolve_users(revisions: list[Revision], token: str) -> None:
+    """Snapshots carry author and commenter ids but no user records, so one batch
+    lookup names every commit author and comment."""
+    ids = {i for rev in revisions for i in rev.author_ids}
+    for rev in revisions:
+        ids.update(c.get("created_by_id") for c in rev.comments.values())
+    users = load_users(sorted(i for i in ids if i), token)
+    for rev in revisions:
+        rev.users = users
+
+
+def build_repo(out: Path, block_id: str, revisions: list[Revision]) -> None:
+    if out.exists() and any(out.iterdir()):
+        die(f"{out} exists and is not empty")
+    out.mkdir(parents=True, exist_ok=True)
+    git(out, "init", "--quiet", "--initial-branch=main")
+    committed = 0
+    for rev in revisions:
+        (out / PAGE_FILE).write_text(render_revision(rev, block_id))
+        git(out, "add", PAGE_FILE)
+        if not git(out, "status", "--porcelain").strip():
+            log(f"  {fmt_time(rev.time_ms)} unchanged, skipped ({rev.label})")
+            continue
+        commit(out, rev, block_id)
+        committed += 1
+    log(f"{committed} commits in {out}")
+
+
+def commit(out: Path, rev: Revision, block_id: str) -> None:
+    authors = [user_name(rev.users.get(i) or {}) for i in rev.author_ids] or ["Unknown"]
+    identity = (rev.users.get(rev.author_ids[0]) if rev.author_ids else None) or {}
+    # Notion redacts other users' email addresses, so most authors get an address
+    # derived from their user id.
+    email = identity.get("email") or (
+        f"{rev.author_ids[0] if rev.author_ids else 'unknown'}@users.notion.so"
+    )
+    message = "\n".join(
+        [
+            f"{fmt_time(rev.time_ms)}",
+            "",
+            f"Authors: {', '.join(authors)}",
+            f"Notion: {page_url(block_id)}",
+            rev.label,
+            "",
+        ]
+    )
+    identities = {
+        "GIT_AUTHOR_NAME": authors[0],
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_AUTHOR_DATE": git_date(rev.time_ms),
+        "GIT_COMMITTER_NAME": authors[0],
+        "GIT_COMMITTER_EMAIL": email,
+        "GIT_COMMITTER_DATE": git_date(rev.time_ms),
+    }
+    git(out, "commit", "--quiet", "--message", message, env=identities)
+
+
+def render_revision(rev: Revision, block_id: str) -> str:
+    root = unwrap(rev.blocks.get(block_id)) or die(
+        f"block {block_id} missing from {rev.label}"
+    )
+    title = rich_text(block_property(root, "title"), rev.users) or "Untitled"
+    body = "\n".join(render_blocks(root.get("content") or [], rev.blocks, rev.users))
+    return f"# {title}\n\n{body.strip()}\n{render_comments(rev, block_id)}"
+
+
+def render_blocks(
+    ids: list[str], blocks: dict[str, Any], users: dict[str, Any], indent: str = ""
+) -> list[str]:
+    out: list[str] = []
+    number = 0
+    previous = ""
+    for bid in ids:
+        block = unwrap(blocks.get(bid))
+        if not block or block.get("alive") is False:
+            continue
+        kind = block.get("type") or ""
+        number = number + 1 if kind == "numbered_list" else 0
+        if previous in LIST_TYPES and kind not in LIST_TYPES:
+            out.append("")
+        previous = kind
+        out.extend(
+            indent + line if line else ""
+            for line in render_block(block, blocks, users, number)
+        )
+        children = [] if kind in OPAQUE_TYPES else block.get("content") or []
+        if children:
+            if kind not in LIST_TYPES:
+                out.append("")
+            out.extend(
+                render_blocks(
+                    children,
+                    blocks,
+                    users,
+                    indent + "  " if kind in LIST_TYPES else indent,
+                )
+            )
+        if kind not in LIST_TYPES:
+            out.append("")
+    return out
+
+
+def render_block(
+    block: dict[str, Any], blocks: dict[str, Any], users: dict[str, Any], number: int
+) -> list[str]:
+    kind = block.get("type") or ""
+    text = rich_text(block_property(block, "title"), users)
+    lines = text.split("\n")
+    if kind in HEADINGS:
+        return [f"{HEADINGS[kind]} {text}"]
+    if kind == "text":
+        return lines
+    if kind == "bulleted_list" or kind == "toggle":
+        return [f"- {text}"]
+    if kind == "numbered_list":
+        return [f"{number}. {text}"]
+    if kind == "to_do":
+        checked = rich_text(block_property(block, "checked"), users) == "Yes"
+        return [f"- [{'x' if checked else ' '}] {text}"]
+    if kind == "quote":
+        return [f"> {line}" for line in lines]
+    if kind == "callout":
+        # Recent callouts hold their prose in child blocks, leaving nothing to
+        # quote here.
+        icon = (block.get("format") or {}).get("page_icon")
+        if not text:
+            return []
+        return [f"> {icon} {lines[0]}".strip() if icon else f"> {lines[0]}"] + [
+            f"> {line}" for line in lines[1:]
+        ]
+    if kind == "code":
+        language = rich_text(block_property(block, "language"), users).lower()
+        return [f"```{language}", *lines, "```"]
+    if kind == "equation":
+        return ["$$", text, "$$"]
+    if kind == "divider":
+        return ["---"]
+    if kind == "page":
+        return [f"- [{text or 'Untitled'}]({page_url(block['id'])})"]
+    if kind == "table":
+        return render_table(block, blocks, users)
+    if kind == "image":
+        return [f"![{text}]({rich_text(block_property(block, 'source'), users)})"]
+    if kind in {"video", "audio", "file", "pdf"}:
+        source = rich_text(block_property(block, "source"), users)
+        return [f"[{text or kind}]({source})"]
+    if kind == "bookmark":
+        link = rich_text(block_property(block, "link"), users)
+        return [f"[{text or link}]({link})"]
+    if kind == "external_object_instance":
+        fmt = block.get("format") or {}
+        return [f"[{fmt.get('domain') or 'link'}]({fmt.get('original_url') or ''})"]
+    if kind in {"collection_view", "collection_view_page"}:
+        return [f"[database]({page_url(block['id'])})"]
+    if kind == "transclusion_reference":
+        pointer = (block.get("format") or {}).get(
+            "transclusion_reference_pointer"
+        ) or {}
+        return [f"[synced block]({page_url(pointer.get('id') or block['id'])})"]
+    if kind == "alias":
+        pointer = (block.get("format") or {}).get("alias_pointer") or {}
+        return [f"- [linked page]({page_url(pointer.get('id') or block['id'])})"]
+    if kind in CONTAINER_TYPES:
+        return []
+    return lines if text else []
+
+
+def render_table(
+    block: dict[str, Any], blocks: dict[str, Any], users: dict[str, Any]
+) -> list[str]:
+    """A `table` block's rows are `table_row` children whose properties are keyed
+    by the column ids in the table's own column order."""
+    fmt = block.get("format") or {}
+    columns = fmt.get("table_block_column_order") or []
+    rows = [
+        [cell(row, column, users) for column in columns]
+        for bid in block.get("content") or []
+        if (row := unwrap(blocks.get(bid)))
+    ]
+    if not rows:
+        return []
+    header = (
+        rows.pop(0) if fmt.get("table_block_column_header") else [""] * len(columns)
+    )
+    return [
+        f"| {' | '.join(header)} |",
+        f"|{'|'.join(' --- ' for _ in columns)}|",
+        *(f"| {' | '.join(row)} |" for row in rows),
+    ]
+
+
+def cell(row: dict[str, Any], column: str, users: dict[str, Any]) -> str:
+    text = rich_text(block_property(row, column), users)
+    return text.replace("|", "\\|").replace("\n", "<br>")
+
+
+def render_comments(rev: Revision, page_id: str) -> str:
+    """Snapshots carry the comment threads as they stood at the time; render them
+    the way notion-fetch does, ordered by the block they annotate."""
+    if not rev.comments:
+        return ""
+    position = {bid: i for i, bid in enumerate(block_order(rev.blocks, page_id))}
+    threads: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in rev.comments.values():
+        if c.get("alive") is not False:
+            threads[c.get("parent_id")].append(c)
+
+    def thread_key(discussion_id: str) -> tuple[int, str]:
+        anchor = (rev.discussions.get(discussion_id) or {}).get("parent_id")
+        return position.get(anchor, len(position)), discussion_id
+
+    out = ["", "## Comments", ""]
+    for did in sorted(threads, key=thread_key):
+        disc = rev.discussions.get(did) or {}
+        context = rich_text(disc.get("context"), rev.users).strip()
+        heading = f'On "{context}"' if context else "Page comment"
+        if disc.get("resolved"):
+            heading += " _(resolved)_"
+        out.append(f"### {heading}")
+        for c in sorted(threads[did], key=lambda c: c.get("created_time") or 0):
+            author = rev.users.get(c.get("created_by_id")) or {}
+            when = fmt_time(c.get("created_time"))
+            body = rich_text(c.get("text"), rev.users).strip()
+            out.append(
+                f"- **{user_name(author)}**{f' ({when})' if when else ''}: {body}"
+            )
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def list_snapshots(block_id: str, space_id: str, token: str) -> list[dict[str, Any]]:
+    """Notion serves version history from the space's own cell, so this is the one
+    call that needs the space routing header."""
+    resp = api_post(
+        "getSnapshotsList", {"blockId": block_id, "size": 1000}, token, space_id
+    )
+    return sorted(
+        (
+            s
+            for s in resp.get("snapshots") or []
+            if s.get("parent_id") == block_id and s.get("timestamp")
+        ),
+        key=lambda s: int(s["timestamp"]),
+    )
+
+
+def load_page_records(page_id: str, token: str) -> dict[str, dict[str, Any]]:
+    tables: dict[str, dict[str, Any]] = defaultdict(dict)
+    cursor: dict[str, Any] = {"stack": []}
+    while True:
+        resp = api_post(
+            "loadPageChunk",
+            {
+                "pageId": page_id,
+                "limit": 100,
+                "cursor": cursor,
+                "chunkNumber": 0,
+                "verticalColumns": False,
+            },
+            token,
+        )
+        merge_record_map(tables, resp.get("recordMap"))
+        cursor = resp.get("cursor") or {}
+        if not cursor.get("stack"):
+            break
+    return tables
+
+
+def load_users(ids: list[str], token: str) -> dict[str, Any]:
+    if not ids:
+        return {}
+    resp = api_post(
+        "syncRecordValues",
+        {
+            "requests": [
+                {"pointer": {"table": "notion_user", "id": i}, "version": -1}
+                for i in ids
+            ]
+        },
+        token,
+    )
+    return plain_records((resp.get("recordMap") or {}).get("notion_user"))
+
+
+def space_of(block_id: str, token: str) -> str:
+    resp = api_post(
+        "syncRecordValues",
+        {"requests": [{"pointer": {"table": "block", "id": block_id}, "version": -1}]},
+        token,
+    )
+    record = unwrap((resp.get("recordMap") or {}).get("block", {}).get(block_id))
+    if not record or not record.get("space_id"):
+        die(f"cannot resolve space for block {block_id}")
+    return record["space_id"]
+
+
+def plain_records(records: Any) -> dict[str, Any]:
+    return {
+        rid: value
+        for rid, rec in (records or {}).items()
+        if (value := unwrap(rec)) is not None
+    }
+
+
+def merge_record_map(tables: dict[str, dict[str, Any]], record_map: Any) -> None:
+    for table, recs in (record_map or {}).items():
+        if isinstance(recs, dict):
+            tables[table].update(plain_records(recs))
+
+
+def unwrap(rec: Any) -> dict[str, Any] | None:
+    """Peel record wrappers ({spaceId/value/role: ...}) down to the record itself,
+    which is the first nested dict carrying an ``id``."""
+    while (
+        isinstance(rec, dict) and "id" not in rec and isinstance(rec.get("value"), dict)
+    ):
+        rec = rec["value"]
+    return rec if isinstance(rec, dict) and "id" in rec else None
+
+
+def block_property(block: dict[str, Any], name: str) -> Any:
+    return (block.get("properties") or {}).get(name)
+
+
+def block_order(blocks: dict[str, Any], root: str) -> list[str]:
+    order: list[str] = []
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        bid = stack.pop()
+        block = unwrap(blocks.get(bid))
+        if bid in seen or not block:
+            continue
+        seen.add(bid)
+        order.append(bid)
+        stack.extend(reversed(block.get("content") or []))
+    return order
+
+
+def rich_text(rt: Any, users: dict[str, Any]) -> str:
+    if not isinstance(rt, list):
+        return ""
+    return "".join(
+        decorate(seg[0], seg[1] if len(seg) > 1 else [], users) for seg in rt if seg
+    )
+
+
+def decorate(text: str, decorations: Any, users: dict[str, Any]) -> str:
+    for d in decorations or []:
+        if not d:
+            continue
+        code, arg = d[0], d[1] if len(d) > 1 else None
+        if code == "c":
+            text = f"`{text}`"
+        elif code == "b":
+            text = f"**{text}**"
+        elif code == "i":
+            text = f"*{text}*"
+        elif code == "s":
+            text = f"~~{text}~~"
+        elif code == "e":
+            text = f"${arg}$"
+        elif code == "a":
+            text = f"[{text}]({arg})"
+        elif code == "u":
+            text = f"@{user_name(users.get(arg) or {})}"
+        elif code == "p" and arg:
+            text = f"[page]({page_url(arg)})"
+        elif code == "d" and isinstance(arg, dict):
+            text = arg.get("start_date") or text
+    return text
+
+
+def user_name(user: dict[str, Any]) -> str:
+    parts = [user.get("given_name"), user.get("family_name")]
+    return user.get("name") or " ".join(p for p in parts if p) or "Unknown"
+
+
+def page_slug(rev: Revision, block_id: str) -> str:
+    root = unwrap(rev.blocks.get(block_id)) or {}
+    title = rich_text(block_property(root, "title"), rev.users)
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or block_id
+
+
+def page_url(block_id: str) -> str:
+    return f"https://www.notion.so/{(block_id or '').replace('-', '')}"
+
+
+def git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **(env or {})},
+    )
+    if result.returncode:
+        die(f"git {' '.join(args)}: {result.stderr.strip()}")
+    return result.stdout
+
+
+def git_date(ms: int) -> str:
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.UTC).isoformat()
+
+
+def fmt_time(ms: Any) -> str:
+    try:
+        moment = datetime.datetime.fromtimestamp(int(ms) / 1000, datetime.UTC)
+        return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def extract_block_id(url: str) -> str:
+    ids = UUID_RE.findall(url.split("#", 1)[0])
+    if not ids:
+        die(f"no page id found in URL: {url}")
+    raw = ids[-1].replace("-", "").lower()
+    return f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
+
+
+def notion_cookies(profile: str | None) -> dict[str, str]:
+    cookie_file = None
+    if profile:
+        cookie_file = (
+            Path.home()
+            / "Library/Application Support/Google/Chrome"
+            / profile
+            / "Cookies"
+        )
+    cookies = chrome_cookies("https://www.notion.so", cookie_file=cookie_file)
+    if not cookies.get("token_v2"):
+        die(
+            "no token_v2 cookie for www.notion.so; log into Notion in Chrome"
+            + (f" ({profile})" if profile else "")
+        )
+    return cookies
+
+
+def api_post(
+    path: str, body: dict[str, Any], token: str, space_id: str | None = None
+) -> dict[str, Any]:
+    headers = {"Content-Type": "application/json", "Cookie": f"token_v2={token}"}
+    if space_id:
+        headers["x-notion-space-id"] = space_id
+    req = urllib.request.Request(
+        f"{API}/{path}",
+        data=json.dumps(body).encode(),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        die(
+            f"POST {path} -> {e.code} {e.reason}: {e.read().decode(errors='replace')[:500]}"
+        )
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def die(msg: str) -> NoReturn:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
