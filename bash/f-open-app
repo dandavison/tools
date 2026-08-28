@@ -3,9 +3,16 @@
 # reachable regardless of how this is launched.
 export PATH="$HOME/bin:/opt/homebrew/bin:$PATH"
 
+extra_apps=(
+    "/System/Applications/System Settings.app"
+)
+
 pick() {
     local app
-    app="$(command fd -d 1 '.+\.app' /Applications /System/Applications ~/Applications/Chrome\ Apps.localized/ |
+    app="$(
+        { command fd -d 1 '.+\.app' /Applications ~/Applications/Chrome\ Apps.localized/
+          printf '%s\n' "${extra_apps[@]}"
+        } |
         rg -r '$2$1' '^(.*/([^/]+)\.app)/?$' |
         fzf --with-nth 1 -d / |
         sed -E 's,[^/]+/,/,')"
