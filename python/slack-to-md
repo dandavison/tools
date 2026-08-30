@@ -52,7 +52,7 @@ def main() -> None:
     messages = data.get("messages") or die(f"No messages at {args.target}")
     users = data.get("referenced_users", {})
     url_match = MESSAGE_URL.search(args.target)
-    host = url_match.group(1) if url_match else workspace_host()
+    host = url_match.group(1) if url_match else workspace_host(args.workspace)
     channel_id = (
         url_match.group(2)
         if url_match
@@ -150,8 +150,13 @@ def permalink(host: str, channel_id: str | None, ts: str, thread_ts: str | None)
     return url
 
 
-def workspace_host() -> str:
-    return json.loads(run(["agent-slack", "auth", "test"]))["url"].split("/")[2]
+def workspace_host(workspace: str | None) -> str:
+    # Must follow --workspace: without it `auth test` reports the default workspace, and every
+    # permalink for a channel in any other workspace comes out pointing at the wrong host.
+    cmd = ["agent-slack", "auth", "test"]
+    if workspace:
+        cmd += ["--workspace", workspace]
+    return json.loads(run(cmd))["url"].split("/")[2]
 
 
 def run(cmd: list[str]) -> str:
