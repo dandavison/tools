@@ -1,0 +1,2 @@
+#!/bin/bash
+cd ~/src/temporalio-etc/log && make && git add . && git commit -am update
