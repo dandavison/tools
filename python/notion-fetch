@@ -149,7 +149,7 @@ def markdown_from_zip(data: bytes) -> str:
     names = sorted(n for n in zf.namelist() if n.lower().endswith(".md"))
     if not names:
         die(f"no markdown in export zip (entries: {zf.namelist()[:10]})")
-    docs = [inline_databases(zf, n) for n in names]
+    docs = [fold_table_rows(inline_databases(zf, n)) for n in names]
     if len(docs) == 1:
         return docs[0]
     return "\n\n\n".join(f"<!-- {n} -->\n\n{d}" for n, d in zip(names, docs))
@@ -170,6 +170,29 @@ def inline_databases(zf: zipfile.ZipFile, md_name: str) -> str:
 
     md = zf.read(md_name).decode("utf-8")
     return re.sub(r"\[([^\]]*)\]\(([^)]+\.csv)\)", splice, md)
+
+
+def fold_table_rows(md: str) -> str:
+    """A table cell holding several Notion blocks is exported across several
+    physical lines, which breaks the pipe-table syntax; fold each row back onto
+    one line, keeping the block breaks as ``<br>``."""
+    out: list[str] = []
+    row: list[str] | None = None
+    fenced = False
+    for line in md.split("\n"):
+        if row is not None:
+            row.append(line)
+            if line.rstrip().endswith("|"):
+                out.append("<br>".join(row))
+                row = None
+        elif not fenced and line.startswith("|") and not line.rstrip().endswith("|"):
+            row = [line]
+        else:
+            fenced ^= line.lstrip().startswith("```")
+            out.append(line)
+    if row is not None:
+        out.append("<br>".join(row))
+    return "\n".join(out)
 
 
 def render_rows(rows: list[list[str]]) -> str:
