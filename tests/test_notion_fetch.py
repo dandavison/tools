@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
+import zipfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import ModuleType
@@ -93,3 +95,23 @@ def test_loads_comments_from_toggleable_descendant_chunks() -> None:
 
     assert list(records["comment"]) == [COMMENT_ID]
     assert [path for path, _ in calls] == ["loadPageChunk", "loadCachedPageChunks"]
+
+
+def test_multi_block_table_cells_are_folded_into_one_row() -> None:
+    notion_fetch = cast(Any, load_module())
+    md = "| A | B |\n| --- | --- |\n| first block\n\nsecond block | other |\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Page.md", md)
+
+    rows = [
+        line
+        for line in notion_fetch.markdown_from_zip(buf.getvalue()).splitlines()
+        if line.startswith("|")
+    ]
+
+    assert rows == [
+        "| A | B |",
+        "| --- | --- |",
+        "| first block<br><br>second block | other |",
+    ]
