@@ -11,6 +11,7 @@ with per-message permalinks.
 
 Usage:
   slack-to-md <message-url>                 # a whole thread
+  slack-to-md <channel-url> --limit 200     # recent channel history
   slack-to-md '#team-eng-server' --limit 50 # recent channel history
 """
 
@@ -23,7 +24,7 @@ import sys
 from datetime import datetime
 from typing import Any, NoReturn
 
-MESSAGE_URL = re.compile(r"https://([^/]+)/archives/(C[A-Z0-9]+)/p(\d{10})(\d{6})")
+ARCHIVES_URL = re.compile(r"https://([^/]+)/archives/(C[A-Z0-9]+)(/p\d{16})?")
 
 
 def main() -> None:
@@ -33,11 +34,18 @@ def main() -> None:
     parser.add_argument("--workspace", help="workspace selector, if ambiguous")
     args = parser.parse_args()
 
+    url = ARCHIVES_URL.search(args.target)
+    # agent-slack takes a message URL as-is, but only a bare channel ID (plus workspace)
+    # for a channel URL.
+    is_thread = bool(url and url.group(3))
+    target = args.target if is_thread or not url else url.group(2)
+    workspace = args.workspace or (None if is_thread or not url else url.group(1))
+
     cmd = [
         "agent-slack",
         "message",
         "list",
-        args.target,
+        target,
         "--resolve-users",
         "--include-reactions",
         "--max-body-chars",
@@ -45,22 +53,19 @@ def main() -> None:
     ]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
-    if args.workspace:
-        cmd += ["--workspace", args.workspace]
+    if workspace:
+        cmd += ["--workspace", workspace]
     data = json.loads(run(cmd))
 
     messages = data.get("messages") or die(f"No messages at {args.target}")
     users = data.get("referenced_users", {})
-    url_match = MESSAGE_URL.search(args.target)
-    host = url_match.group(1) if url_match else workspace_host(args.workspace)
+    host = url.group(1) if url else workspace_host(args.workspace)
     channel_id = (
-        url_match.group(2)
-        if url_match
-        else data.get("channel_id") or messages[0].get("channel_id")
+        url.group(2) if url else data.get("channel_id") or messages[0].get("channel_id")
     )
-    thread_ts = messages[0]["ts"] if url_match else None
+    thread_ts = messages[0]["ts"] if is_thread else None
 
-    print(header(args.target, messages, users, thread_ts, host, channel_id))
+    print(header(target, messages, users, thread_ts, host, channel_id))
     day = None
     for message in messages:
         when = datetime.fromtimestamp(float(message["ts"]))
