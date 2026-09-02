@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
-import sys
-
 
 SCRIPT_PATH = Path(__file__).parent.parent / "python" / "es-viz"
 
@@ -113,7 +112,9 @@ class TestFlattenAggregations(unittest.TestCase):
         self.assertEqual(len(tables), 1)
         table = tables[0]
         self.assertEqual(table.name, "by5m / by_status")
-        self.assertEqual(kinds(table.dims), [("by5m", "time"), ("by_status", "category")])
+        self.assertEqual(
+            kinds(table.dims), [("by5m", "time"), ("by_status", "category")]
+        )
         self.assertEqual(
             table.rows,
             [
@@ -145,7 +146,10 @@ class TestFlattenAggregations(unittest.TestCase):
         self.assertEqual(kinds(tables[0].dims), [("by_state", "category")])
         self.assertEqual(
             tables[0].rows,
-            [{"by_state": "open", "doc_count": 5}, {"by_state": "closed", "doc_count": 2}],
+            [
+                {"by_state": "open", "doc_count": 5},
+                {"by_state": "closed", "doc_count": 2},
+            ],
         )
 
     def test_metric_aggs_become_measures(self):
@@ -250,7 +254,9 @@ class TestNonAggregationResponses(unittest.TestCase):
         self.assertEqual(table.rows[0]["WorkflowId"], "wf-1")
 
     def test_nested_source_objects_are_dotted(self):
-        table = es_viz.table_from_hits([{"_id": "a", "_source": {"outer": {"inner": 3}}}])
+        table = es_viz.table_from_hits(
+            [{"_id": "a", "_source": {"outer": {"inner": 3}}}]
+        )
 
         self.assertEqual(table.rows[0]["outer.inner"], 3)
 
@@ -300,12 +306,13 @@ class TestNonAggregationResponses(unittest.TestCase):
 
 
 class TestChartForm(unittest.TestCase):
-    def form(self, dims, measures=("doc_count",), rows=None):
+    def form(self, dims, measures=("doc_count",), points=0):
+        rows = [{dims[0][0]: str(i)} for i in range(points)]
         table = es_viz.Table(
             name="t",
             dims=[es_viz.Column(name, kind) for name, kind in dims],
             measures=[es_viz.Column(name, "number") for name in measures],
-            rows=rows or [],
+            rows=rows,
         )
         return es_viz.chart_form(table)
 
@@ -316,17 +323,14 @@ class TestChartForm(unittest.TestCase):
         self.assertEqual(self.form([("by_ns", "category")]), "bars")
 
     def test_one_time_dimension_is_columns(self):
-        rows = [{"t": i} for i in range(24)]
-        self.assertEqual(self.form([("by5m", "time")], rows=rows), "columns")
+        self.assertEqual(self.form([("by5m", "time")], points=24), "columns")
 
     def test_many_time_buckets_switch_to_a_line(self):
-        rows = [{"t": i} for i in range(200)]
-        self.assertEqual(self.form([("by5m", "time")], rows=rows), "lines")
+        self.assertEqual(self.form([("by5m", "time")], points=200), "lines")
 
     def test_time_plus_category_is_stacked_columns(self):
-        rows = [{"t": i} for i in range(24)]
         self.assertEqual(
-            self.form([("by5m", "time"), ("by_status", "category")], rows=rows),
+            self.form([("by5m", "time"), ("by_status", "category")], points=24),
             "columns",
         )
 

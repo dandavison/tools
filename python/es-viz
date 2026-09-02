@@ -1,0 +1,990 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Visualize an Elasticsearch/OpenSearch response as a self-contained HTML page.
+
+Reads a JSON response on stdin (or from a file) and picks the chart from the
+shape of the data:
+
+  aggregations   an aggregation tree is flattened into a tidy table -- one
+                 column per nesting level, one row per leaf bucket -- then
+                 charted by column type: time -> columns or line, one category
+                 -> horizontal bars, time x category -> stacked columns,
+                 category x category -> heatmap, metrics only -> stat tiles.
+  hits.hits      a document table, `_source` flattened with dotted names.
+  a JSON array   `_cat/*?format=json` output as a table; numeric columns
+                 become measures, so they chart too.
+  anything else  a key/value panel (`_cluster/health`, `_settings`).
+
+Three or more nesting levels are shown as a table only: a chart of three
+dimensions misleads more than it explains. Every chart also ships its table.
+
+Examples:
+  ct cell vis query -c s-gc021 --post '{visindex}/_search' -d @agg.json | es-viz
+
+  ct cell vis query -c s-aw024 '_cat/indices?format=json' | es-viz
+
+  es-viz --title 'gc021 scheduled starts' response.json
+
+Times are rendered in UTC, matching what Elasticsearch returns.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime
+from html import escape
+from pathlib import Path
+from typing import Any, Literal
+
+Kind = Literal["time", "number", "category"]
+
+OTHER = "Other"
+SERIES_LIMIT = 8
+POINT_LIMIT = 60
+CATEGORY_LIMIT = 40
+HEATMAP_COLUMN_LIMIT = 60
+TABLE_ROW_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class Column:
+    name: str
+    kind: Kind
+
+
+@dataclass
+class Table:
+    name: str
+    dims: list[Column]
+    measures: list[Column]
+    rows: list[dict[str, Any]]
+
+
+@dataclass
+class Document:
+    tables: list[Table]
+    keyvalues: list[tuple[str, str]]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="es-viz",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "input",
+        nargs="?",
+        type=Path,
+        help="JSON response to read (default: stdin).",
+    )
+    parser.add_argument("--title", default="Elasticsearch response", help="Page title.")
+    parser.add_argument(
+        "-o", "--output", type=Path, help="Write HTML here (default: a temp file)."
+    )
+    parser.add_argument(
+        "--no-open", action="store_true", help="Do not open the result in a browser."
+    )
+    return parser.parse_args()
+
+
+def parse_input(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"input is not JSON ({error.msg} at line {error.lineno}); "
+            "_cat endpoints need format=json rather than v"
+        ) from error
+
+
+# --- response -> tables ------------------------------------------------------
+
+
+def build_document(response: Any) -> Document:
+    if isinstance(response, list):
+        return Document(tables=[table_from_records(response)], keyvalues=[])
+    if not isinstance(response, dict):
+        raise SystemExit("expected a JSON object or array")
+
+    tables: list[Table] = []
+    if isinstance(response.get("aggregations"), dict):
+        tables.extend(tables_from_aggregations(response["aggregations"]))
+    hits = (
+        response.get("hits", {}).get("hits")
+        if isinstance(response.get("hits"), dict)
+        else None
+    )
+    if hits:
+        tables.append(table_from_hits(hits))
+
+    if "hits" in response or "took" in response:
+        return Document(tables=tables, keyvalues=search_metadata(response))
+    return Document(tables=tables, keyvalues=flat_keyvalues(response))
+
+
+def search_metadata(response: dict[str, Any]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    if "took" in response:
+        out.append(("took", f"{response['took']}ms"))
+    total = response.get("hits", {}).get("total")
+    if isinstance(total, dict):
+        prefix = "≥" if total.get("relation") == "gte" else ""
+        out.append(("hits.total", f"{prefix}{total.get('value')}"))
+    shards = response.get("_shards")
+    if isinstance(shards, dict):
+        out.append(
+            (
+                "shards",
+                f"{shards.get('successful')}/{shards.get('total')} ok, {shards.get('failed')} failed",
+            )
+        )
+    if response.get("timed_out"):
+        out.append(("timed_out", "true"))
+    return out
+
+
+def tables_from_aggregations(aggs: dict[str, Any]) -> list[Table]:
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for path, row in walk_aggs(aggs, (), {}, {}):
+        grouped.setdefault(path, []).append(row)
+    return [build_table(path, rows) for path, rows in grouped.items()]
+
+
+def walk_aggs(
+    node: dict[str, Any],
+    path: tuple[str, ...],
+    keys: dict[str, Any],
+    measures: dict[str, Any],
+) -> Iterator[tuple[tuple[str, ...], dict[str, Any]]]:
+    """Yield (agg-name path, row) for every leaf bucket of an aggregation tree."""
+    bucket_aggs = [(name, body) for name, body in node.items() if is_bucket_agg(body)]
+    measures = {**measures, **metric_measures(node)}
+    if not bucket_aggs:
+        yield path, {**keys, **measures}
+        return
+    for name, body in bucket_aggs:
+        for label, bucket in bucket_items(body):
+            own = {"doc_count": bucket["doc_count"]} if "doc_count" in bucket else {}
+            yield from walk_aggs(
+                {k: v for k, v in bucket.items() if isinstance(v, dict)},
+                path + (name,),
+                {**keys, name: label},
+                {**measures, **own},
+            )
+
+
+def is_bucket_agg(body: Any) -> bool:
+    return isinstance(body, dict) and "buckets" in body
+
+
+def bucket_items(body: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    buckets = body["buckets"]
+    if isinstance(buckets, dict):
+        return list(buckets.items())
+    return [(bucket_label(bucket), bucket) for bucket in buckets]
+
+
+def bucket_label(bucket: dict[str, Any]) -> str:
+    if "key_as_string" in bucket:
+        return str(bucket["key_as_string"])
+    return str(bucket.get("key"))
+
+
+def metric_measures(node: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for name, body in node.items():
+        if not isinstance(body, dict) or is_bucket_agg(body) or "hits" in body:
+            continue
+        for leaf, value in flatten_scalars(body):
+            leaf = leaf.removeprefix("values.")
+            out[name if leaf == "value" else f"{name}.{leaf}"] = value
+    return out
+
+
+def build_table(path: tuple[str, ...], rows: list[dict[str, Any]]) -> Table:
+    dims = [Column(name, dim_kind([row[name] for row in rows])) for name in path]
+    measures = [
+        Column(name, "number")
+        for name in dict.fromkeys(key for row in rows for key in row if key not in path)
+    ]
+    return Table(
+        name=" / ".join(path) or "metrics", dims=dims, measures=measures, rows=rows
+    )
+
+
+def table_from_hits(hits: list[dict[str, Any]]) -> Table:
+    rows: list[dict[str, Any]] = []
+    for hit in hits:
+        row: dict[str, Any] = {"_id": hit.get("_id")}
+        if hit.get("_score") is not None:
+            row["_score"] = hit["_score"]
+        row.update(dict(flatten_scalars(hit.get("_source", {}))))
+        rows.append(row)
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    return Table(
+        name="hits",
+        dims=[
+            Column(name, dim_kind([row.get(name) for row in rows])) for name in columns
+        ],
+        measures=[],
+        rows=rows,
+    )
+
+
+def table_from_records(records: list[Any]) -> Table:
+    rows = [
+        dict(flatten_scalars(record)) for record in records if isinstance(record, dict)
+    ]
+    if not rows:
+        raise SystemExit("no objects in the JSON array")
+    columns = [
+        Column(name, dim_kind([row.get(name) for row in rows]))
+        for name in dict.fromkeys(key for row in rows for key in row)
+    ]
+    measures = [column for column in columns if column.kind == "number"]
+    for row in rows:
+        for column in measures:
+            if column.name in row:
+                row[column.name] = float(row[column.name])
+    return Table(
+        name="records",
+        dims=[column for column in columns if column.kind != "number"],
+        measures=measures,
+        rows=rows,
+    )
+
+
+def flatten_scalars(obj: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from flatten_scalars(value, f"{prefix}{key}.")
+    elif isinstance(obj, list):
+        yield prefix.rstrip("."), json.dumps(obj)
+    else:
+        yield prefix.rstrip("."), obj
+
+
+def flat_keyvalues(obj: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(name, format_scalar(value)) for name, value in flatten_scalars(obj)]
+
+
+def format_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def dim_kind(values: list[Any]) -> Kind:
+    present = [value for value in values if value is not None]
+    if not present:
+        return "category"
+    if all(is_iso_datetime(value) for value in present):
+        return "time"
+    if all(is_number(value) for value in present):
+        return "number"
+    return "category"
+
+
+def is_iso_datetime(value: Any) -> bool:
+    if not isinstance(value, str) or "-" not in value:
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def is_number(value: Any) -> bool:
+    return to_float(value) is not None
+
+
+def to_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+# --- table -> chart ----------------------------------------------------------
+
+
+def chart_form(table: Table) -> str:
+    if not table.measures:
+        return "table"
+    if not table.dims:
+        return "tiles"
+    if len(table.dims) > 2:
+        return "table"
+    ordinal = [column for column in table.dims if column.kind in ("time", "number")]
+    if len(table.dims) == 1:
+        if not ordinal:
+            return "bars"
+        return "lines" if len(table.rows) > POINT_LIMIT else "columns"
+    if not ordinal:
+        return "heatmap"
+    points = len({row[ordinal[0].name] for row in table.rows})
+    return "lines" if points > POINT_LIMIT else "columns"
+
+
+def ranking(rows: list[dict[str, Any]], dim: str, measure: str) -> list[str]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        totals[row[dim]] = totals.get(row[dim], 0.0) + (
+            to_float(row.get(measure)) or 0.0
+        )
+    return sorted(totals, key=lambda name: -totals[name])
+
+
+def series_order(table: Table, dim: str, measure: str) -> list[str]:
+    ranked = ranking(table.rows, dim, measure)
+    if len(ranked) <= SERIES_LIMIT:
+        return ranked
+    return ranked[: SERIES_LIMIT - 1] + [OTHER]
+
+
+def fold_rows(
+    rows: list[dict[str, Any]], dim: str, keep: set[str], measures: list[str]
+) -> list[dict[str, Any]]:
+    measure_set = set(measures)
+    out: dict[tuple[tuple[str, Any], ...], dict[str, Any]] = {}
+    for row in rows:
+        folded = dict(row)
+        if folded[dim] not in keep:
+            folded[dim] = OTHER
+        identity = tuple((k, v) for k, v in folded.items() if k not in measure_set)
+        target = out.setdefault(identity, dict(identity))
+        for name in measure_set:
+            value = to_float(folded.get(name))
+            if value is not None:
+                target[name] = (target.get(name) or 0) + value
+    return list(out.values())
+
+
+def build_card(table: Table) -> dict[str, Any]:
+    form = chart_form(table)
+    measures = [column.name for column in table.measures]
+    rows = table.rows
+    notes: list[str] = []
+    x_dim = series_dim = None
+    series: list[str] = []
+
+    if form == "heatmap":
+        # The outer agg's keys are the longer ones, so they go down the y axis
+        # where there is room for them.
+        series_dim, x_dim = table.dims[0].name, table.dims[1].name
+    elif form in ("columns", "lines", "bars"):
+        ordinal = [column for column in table.dims if column.kind in ("time", "number")]
+        x_dim = (ordinal[0] if ordinal else table.dims[0]).name
+        rest = [column.name for column in table.dims if column.name != x_dim]
+        series_dim = rest[0] if rest else None
+
+    if series_dim and form == "heatmap":
+        series = ranking(rows, series_dim, measures[0])
+        if len(series) > CATEGORY_LIMIT:
+            notes.append(f"top {CATEGORY_LIMIT} of {len(series)} {series_dim} rows")
+            series = series[:CATEGORY_LIMIT]
+            rows = [row for row in rows if row[series_dim] in set(series)]
+        columns = ranking(rows, str(x_dim), measures[0])
+        if len(columns) > HEATMAP_COLUMN_LIMIT:
+            notes.append(
+                f"top {HEATMAP_COLUMN_LIMIT} of {len(columns)} {x_dim} columns"
+            )
+            rows = [
+                row
+                for row in rows
+                if row[str(x_dim)] in set(columns[:HEATMAP_COLUMN_LIMIT])
+            ]
+    elif series_dim:
+        series = series_order(table, series_dim, measures[0])
+        if OTHER in series:
+            notes.append(f"tail of {series_dim} folded into {OTHER} (summed)")
+            rows = fold_rows(rows, series_dim, set(series) - {OTHER}, measures)
+
+    if form == "bars":
+        ranked = ranking(rows, str(x_dim), measures[0])
+        if len(ranked) > CATEGORY_LIMIT:
+            notes.append(f"top {CATEGORY_LIMIT} of {len(ranked)} by {measures[0]}")
+            rows = [
+                row for row in rows if row[str(x_dim)] in set(ranked[:CATEGORY_LIMIT])
+            ]
+
+    if any(column.kind == "time" for column in table.dims):
+        notes.append("times UTC")
+    if len(rows) > TABLE_ROW_LIMIT:
+        notes.append(
+            f"table view shows the first {TABLE_ROW_LIMIT} of {len(rows)} rows"
+        )
+
+    return {
+        "name": table.name,
+        "form": form,
+        "columns": [
+            {"name": c.name, "kind": c.kind} for c in table.dims + table.measures
+        ],
+        "measures": measures,
+        "xDim": x_dim,
+        "xKind": next((c.kind for c in table.dims if c.name == x_dim), None),
+        "seriesDim": series_dim,
+        "series": series,
+        "rows": rows,
+        "note": " · ".join(notes),
+    }
+
+
+# --- HTML --------------------------------------------------------------------
+
+
+def render_html(document: Document, title: str) -> str:
+    payload = {
+        "cards": [build_card(table) for table in document.tables],
+        "keyvalues": document.keyvalues,
+    }
+    return (
+        HTML_TEMPLATE.replace("__TITLE__", escape(title))
+        .replace("__ROW_LIMIT__", str(TABLE_ROW_LIMIT))
+        .replace("__PAYLOAD__", json.dumps(payload))
+    )
+
+
+HTML_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --plane: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+    --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #6da7ec; --seq-4: #3987e5;
+    --seq-5: #256abf; --seq-6: #184f95; --seq-7: #0d366b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --plane: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--plane); color: var(--text-primary);
+  }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .meta { color: var(--text-secondary); margin-bottom: 20px; display: flex; gap: 16px; flex-wrap: wrap; }
+  .meta span b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px 12px; margin-bottom: 18px;
+  }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .note { color: var(--muted); font-size: 12px; margin: 0; }
+  select { font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
+           border: 1px solid var(--axis); background: var(--surface-1); color: var(--text-primary); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 2px 0 8px; font-size: 12px;
+            color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  .legend i.line { height: 2px; width: 14px; border-radius: 2px; }
+  svg { width: 100%; height: auto; display: block; }
+  .tiles { display: flex; gap: 28px; flex-wrap: wrap; padding: 8px 0 12px; }
+  .tile-label { color: var(--text-secondary); font-size: 12px; }
+  .tile-value { font-size: 32px; font-weight: 600; line-height: 1.2; }
+  details { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+  .scroll { overflow-x: auto; max-height: 460px; }
+  table { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 3px 12px 3px 0; white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-1); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tip {
+    position: fixed; pointer-events: none; z-index: 10; opacity: 0; transition: opacity .08s;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 12px;
+    box-shadow: 0 3px 14px rgba(0,0,0,0.22); max-width: 380px;
+  }
+  .tip h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .tip div { display: flex; align-items: center; gap: 6px; }
+  .tip i { display: inline-block; width: 12px; height: 2px; border-radius: 2px; flex: none; }
+  .tip b { font-variant-numeric: tabular-nums; }
+  .tip s { text-decoration: none; color: var(--text-secondary); overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body class="viz-root">
+<h1>__TITLE__</h1>
+<div class="meta" id="meta"></div>
+<div id="cards"></div>
+<div class="tip" id="tip"></div>
+<script>
+const PAYLOAD = __PAYLOAD__;
+const ROW_LIMIT = __ROW_LIMIT__;
+const NS = "http://www.w3.org/2000/svg";
+const W = 1160;
+const tip = document.getElementById("tip");
+
+const el = (name, attrs = {}) => {
+  const node = document.createElementNS(NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+};
+const svgText = (attrs, value) => {
+  const node = el("text", {fill: "var(--muted)", "font-size": 11, ...attrs});
+  node.textContent = value;
+  return node;
+};
+const html = (tag, cls, value) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (value !== undefined) node.textContent = value;
+  return node;
+};
+const seriesColor = i => `var(--series-${(i % 8) + 1})`;
+
+const compact = v => {
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v / 1e9).toFixed(a >= 1e10 ? 0 : 1) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
+  if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "K";
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+};
+const axisScale = max => {
+  if (!(max > 0)) return {max: 1, step: 0.25};
+  const raw = max / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) ?? 10 * mag;
+  return {max: Math.ceil(max / step) * step, step};
+};
+const roundedTop = (x, y, w, h, r) => {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}` +
+         `Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+};
+const roundedRight = (x, y, w, h, r) => {
+  r = Math.max(0, Math.min(r, w, h / 2));
+  return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}` +
+         `Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`;
+};
+
+function timeLabels(xs) {
+  const span = Date.parse(xs[xs.length - 1]) - Date.parse(xs[0]);
+  const sameDay = span < 20 * 3600 * 1000;
+  return xs.map(x => {
+    const iso = new Date(Date.parse(x)).toISOString();
+    return sameDay ? iso.slice(11, 16) : iso.slice(5, 16).replace("T", " ");
+  });
+}
+
+function prepare(card, measure) {
+  const xName = card.xDim, sName = card.seriesDim;
+  const series = sName ? card.series.slice() : [null];
+  const grid = new Map(), totals = new Map();
+  for (const row of card.rows) {
+    const x = String(row[xName]);
+    const s = sName ? String(row[sName]) : null;
+    const v = Number(row[measure]);
+    if (!Number.isFinite(v)) continue;
+    if (!grid.has(x)) grid.set(x, new Map());
+    grid.get(x).set(s, (grid.get(x).get(s) ?? 0) + v);
+    totals.set(x, (totals.get(x) ?? 0) + v);
+  }
+  let xs = [...grid.keys()];
+  if (card.xKind === "time") xs.sort((a, b) => Date.parse(a) - Date.parse(b));
+  else if (card.xKind === "number") xs.sort((a, b) => Number(a) - Number(b));
+  else xs.sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+  const at = (x, s) => grid.get(x)?.get(s) ?? 0;
+  return {xs, series, totals, at, stacked: series.length > 1};
+}
+
+function yAxis(svg, M, scale, y) {
+  for (let v = 0; v <= scale.max + scale.step / 2; v += scale.step) {
+    const yy = y(v);
+    svg.appendChild(el("line", {
+      x1: M.l, y1: yy, x2: W - M.r, y2: yy,
+      stroke: v ? "var(--grid)" : "var(--axis)", "stroke-width": 1,
+    }));
+    svg.appendChild(svgText({x: M.l - 8, y: yy + 4, "text-anchor": "end"}, compact(v)));
+  }
+}
+
+function showTip(event, title, entries) {
+  tip.replaceChildren();
+  tip.appendChild(html("h4", null, title));
+  for (const entry of entries) {
+    const row = html("div");
+    const key = html("i");
+    key.style.background = entry.color;
+    row.append(key, html("b", null, compact(entry.value)));
+    if (entry.label !== null) row.appendChild(html("s", null, entry.label));
+    tip.appendChild(row);
+  }
+  tip.style.opacity = 1;
+  tip.style.left = Math.min(event.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = Math.min(event.clientY + 14, innerHeight - tip.offsetHeight - 8) + "px";
+}
+const hideTip = () => { tip.style.opacity = 0; };
+
+function crosshair(svg, M, ih, data, xAt, labels) {
+  const line = el("line", {y1: M.t, y2: M.t + ih, stroke: "var(--axis)", "stroke-width": 1, opacity: 0});
+  svg.appendChild(line);
+  const overlay = el("rect", {x: M.l, y: M.t, width: W - M.l - M.r, height: ih, fill: "transparent"});
+  overlay.addEventListener("pointermove", event => {
+    const box = svg.getBoundingClientRect();
+    const px = ((event.clientX - box.left) / box.width) * W;
+    let best = 0;
+    data.xs.forEach((_, i) => {
+      if (Math.abs(xAt(i) - px) < Math.abs(xAt(best) - px)) best = i;
+    });
+    const x = data.xs[best];
+    line.setAttribute("x1", xAt(best));
+    line.setAttribute("x2", xAt(best));
+    line.setAttribute("opacity", 1);
+    const entries = data.series
+      .map((s, si) => ({label: s, color: seriesColor(si), value: data.at(x, s)}))
+      .filter(entry => entry.value !== 0)
+      .reverse();
+    showTip(event, labels[best], entries.length ? entries : [{label: null, color: seriesColor(0), value: 0}]);
+  });
+  overlay.addEventListener("pointerleave", () => { hideTip(); line.setAttribute("opacity", 0); });
+  svg.appendChild(overlay);
+}
+
+function drawColumns(card, svg, data) {
+  const M = {t: 18, r: 28, b: 40, l: 68}, H = 380;
+  const ih = H - M.t - M.b, iw = W - M.l - M.r;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const scale = axisScale(Math.max(...data.xs.map(x =>
+    data.stacked ? data.totals.get(x) : Math.max(...data.series.map(s => data.at(x, s))))));
+  const y = v => M.t + ih - (v / scale.max) * ih;
+  yAxis(svg, M, scale, y);
+
+  const band = iw / data.xs.length;
+  const bw = Math.min(24, Math.max(2, band - 2));
+  data.xs.forEach((x, i) => {
+    const cx = M.l + band * (i + 0.5) - bw / 2;
+    const cells = data.series
+      .map((s, si) => ({s, si, v: data.at(x, s)}))
+      .filter(cell => cell.v > 0);
+    let cum = 0;
+    cells.forEach((cell, idx) => {
+      const y0 = y(cum), y1 = y(cum + cell.v);
+      cum += cell.v;
+      const h = Math.max(1, y0 - y1 - (idx ? 2 : 0));
+      const top = idx === cells.length - 1;
+      svg.appendChild(el(top ? "path" : "rect", top
+        ? {d: roundedTop(cx, y1, bw, h, 4), fill: seriesColor(cell.si)}
+        : {x: cx, y: y1, width: bw, height: h, fill: seriesColor(cell.si)}));
+    });
+  });
+
+  const labels = card.xKind === "time" ? timeLabels(data.xs) : data.xs.map(String);
+  const step = Math.ceil(data.xs.length / 8);
+  labels.forEach((label, i) => {
+    if (i % step) return;
+    svg.appendChild(svgText(
+      {x: M.l + band * (i + 0.5), y: H - 14, "text-anchor": "middle"}, label));
+  });
+  crosshair(svg, M, ih, data, i => M.l + band * (i + 0.5), labels);
+}
+
+function drawLines(card, svg, data) {
+  const H = 380, M = {t: 18, r: 28, b: 40, l: 68}, ih = H - M.t - M.b;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const scale = axisScale(Math.max(...data.xs.flatMap(x => data.series.map(s => data.at(x, s)))));
+  const y = v => M.t + ih - (v / scale.max) * ih;
+
+  // End labels only earn their gutter when the series separate at the right edge;
+  // nudging converged labels apart detaches them from their lines.
+  const lastX = data.xs[data.xs.length - 1];
+  const endYs = data.series.map(s => y(data.at(lastX, s))).sort((a, b) => a - b);
+  const labelEnds = data.series.length > 1 && data.series.length <= 6 &&
+    endYs.every((v, i) => i === 0 || v - endYs[i - 1] >= 14);
+  if (labelEnds) M.r = 130;
+
+  const iw = W - M.l - M.r;
+  const xAt = i => M.l + (data.xs.length === 1 ? iw / 2 : (iw * i) / (data.xs.length - 1));
+  yAxis(svg, M, scale, y);
+
+  const ends = [];
+  data.series.forEach((s, si) => {
+    const points = data.xs.map((x, i) => `${xAt(i)},${y(data.at(x, s))}`).join(" ");
+    if (data.series.length === 1) {
+      svg.appendChild(el("path", {
+        d: `M${M.l},${M.t + ih}L${points.replace(/ /g, "L")}L${xAt(data.xs.length - 1)},${M.t + ih}Z`,
+        fill: seriesColor(si), "fill-opacity": 0.1,
+      }));
+    }
+    svg.appendChild(el("polyline", {
+      points, fill: "none", stroke: seriesColor(si), "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+    ends.push({si, s, y: y(data.at(data.xs[data.xs.length - 1], s))});
+  });
+
+  if (labelEnds) {
+    for (const end of ends) {
+      svg.appendChild(svgText({
+        x: xAt(data.xs.length - 1) + 8, y: end.y + 4, fill: "var(--text-secondary)",
+      }, end.s));
+    }
+  }
+
+  const labels = card.xKind === "time" ? timeLabels(data.xs) : data.xs.map(String);
+  const step = Math.ceil(data.xs.length / 8);
+  labels.forEach((label, i) => {
+    if (i % step) return;
+    svg.appendChild(svgText({x: xAt(i), y: H - 14, "text-anchor": "middle"}, label));
+  });
+  crosshair(svg, M, ih, data, xAt, labels);
+}
+
+function drawBars(card, svg, data) {
+  const rowH = 26, M = {t: 8, r: 64, b: 8, l: 260};
+  const H = M.t + M.b + rowH * data.xs.length;
+  const iw = W - M.l - M.r;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const max = axisScale(Math.max(...data.xs.map(x => data.totals.get(x)))).max;
+  data.xs.forEach((x, i) => {
+    const v = data.totals.get(x);
+    const bh = Math.min(24, rowH - 2);
+    const yy = M.t + rowH * i + (rowH - bh) / 2;
+    const w = Math.max(1, (v / max) * iw);
+    const label = svgText({x: M.l - 10, y: yy + bh / 2 + 4, "text-anchor": "end",
+                           fill: "var(--text-secondary)"}, x.length > 40 ? x.slice(0, 39) + "…" : x);
+    label.appendChild(el("title")).textContent = x;
+    svg.appendChild(label);
+    svg.appendChild(el("path", {d: roundedRight(M.l, yy, w, bh, 4), fill: seriesColor(0)}));
+    svg.appendChild(svgText({x: M.l + w + 8, y: yy + bh / 2 + 4, fill: "var(--text-secondary)"},
+                            compact(v)));
+    const hit = el("rect", {x: M.l, y: M.t + rowH * i, width: iw, height: rowH, fill: "transparent"});
+    hit.addEventListener("pointermove", event =>
+      showTip(event, x, [{label: null, color: seriesColor(0), value: v}]));
+    hit.addEventListener("pointerleave", hideTip);
+    svg.appendChild(hit);
+  });
+}
+
+function drawHeatmap(card, svg, data) {
+  const rowH = 24, M = {t: 8, r: 24, b: 64, l: 240};
+  const H = M.t + M.b + rowH * data.series.length;
+  const iw = W - M.l - M.r;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const cw = iw / data.xs.length;
+  const max = Math.max(...data.xs.flatMap(x => data.series.map(s => data.at(x, s))));
+  data.series.forEach((s, si) => {
+    const label = svgText({x: M.l - 10, y: M.t + rowH * si + 16, "text-anchor": "end",
+                           fill: "var(--text-secondary)"}, s.length > 34 ? s.slice(0, 33) + "…" : s);
+    label.appendChild(el("title")).textContent = s;
+    svg.appendChild(label);
+    data.xs.forEach((x, xi) => {
+      const v = data.at(x, s);
+      const step = v <= 0 ? 0 : Math.min(7, Math.max(1, Math.ceil((v / max) * 7)));
+      const cell = el("rect", {
+        x: M.l + cw * xi + 1, y: M.t + rowH * si + 1,
+        width: Math.max(1, cw - 2), height: rowH - 2, rx: 2,
+        fill: step ? `var(--seq-${step})` : "var(--grid)",
+      });
+      cell.addEventListener("pointermove", event =>
+        showTip(event, `${s} · ${x}`, [{label: null, color: `var(--seq-${step || 1})`, value: v}]));
+      cell.addEventListener("pointerleave", hideTip);
+      svg.appendChild(cell);
+      if (cw >= 44 && v > 0) {
+        svg.appendChild(svgText({
+          x: M.l + cw * (xi + 0.5), y: M.t + rowH * si + 16, "text-anchor": "middle",
+          fill: step >= 5 ? "#ffffff" : "var(--text-primary)",
+        }, compact(v)));
+      }
+    });
+  });
+  data.xs.forEach((x, xi) => {
+    const label = svgText({
+      "text-anchor": "end", fill: "var(--text-secondary)",
+      transform: `translate(${M.l + cw * (xi + 0.5) + 4},${H - M.b + 14}) rotate(-40)`,
+    }, x.length > 14 ? x.slice(0, 13) + "…" : x);
+    label.appendChild(el("title")).textContent = x;
+    svg.appendChild(label);
+  });
+  return max;
+}
+
+function sequentialLegend(measure, max) {
+  const legend = html("div", "legend");
+  legend.append(html("span", null, measure + " 0"));
+  for (let step = 1; step <= 7; step++) {
+    const swatch = html("i");
+    swatch.style.background = `var(--seq-${step})`;
+    legend.appendChild(swatch);
+  }
+  legend.appendChild(html("span", null, compact(max)));
+  return legend;
+}
+
+function drawTiles(card, host) {
+  const tiles = html("div", "tiles");
+  const row = card.rows[0] ?? {};
+  for (const name of card.measures) {
+    const tile = html("div");
+    tile.append(html("div", "tile-label", name),
+                html("div", "tile-value", Number.isFinite(Number(row[name]))
+                  ? compact(Number(row[name])) : String(row[name] ?? "—")));
+    tiles.appendChild(tile);
+  }
+  host.appendChild(tiles);
+}
+
+function buildLegend(card, data) {
+  if (!card.seriesDim || data.series.length < 2) return null;
+  const legend = html("div", "legend");
+  data.series.forEach((s, si) => {
+    const item = html("span");
+    const key = html("i", card.form === "lines" ? "line" : null);
+    key.style.background = seriesColor(si);
+    item.append(key, html("span", null, s));
+    legend.appendChild(item);
+  });
+  return legend;
+}
+
+function buildTable(card) {
+  const wrap = html("div", "scroll");
+  const table = html("table");
+  const head = html("tr");
+  for (const column of card.columns) {
+    const th = html("th", column.kind === "number" ? "num" : null, column.name);
+    head.appendChild(th);
+  }
+  table.appendChild(head);
+  for (const row of card.rows.slice(0, ROW_LIMIT)) {
+    const tr = html("tr");
+    for (const column of card.columns) {
+      const value = row[column.name];
+      tr.appendChild(html("td", column.kind === "number" ? "num" : null,
+        value === undefined || value === null ? "" :
+        column.kind === "number" ? compact(Number(value)) : String(value)));
+    }
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function renderCard(card) {
+  const section = html("section", "card");
+  const head = html("div", "card-head");
+  head.appendChild(html("h2", null, card.name));
+  const body = html("div");
+  let measure = card.measures[0];
+
+  const draw = () => {
+    body.replaceChildren();
+    if (card.form === "table") { body.appendChild(buildTable(card)); return; }
+    if (card.form === "tiles") { drawTiles(card, body); return; }
+    const data = prepare(card, measure);
+    const svg = el("svg", {role: "img", "aria-label": `${card.name} — ${measure}`});
+    body.appendChild(svg);
+    let legend = null;
+    if (card.form === "heatmap") legend = sequentialLegend(measure, drawHeatmap(card, svg, data));
+    else {
+      legend = buildLegend(card, data);
+      if (card.form === "columns") drawColumns(card, svg, data);
+      else if (card.form === "lines") drawLines(card, svg, data);
+      else drawBars(card, svg, data);
+    }
+    if (legend) body.insertBefore(legend, svg);
+    const details = html("details");
+    details.appendChild(html("summary", null, `Table · ${card.rows.length} rows`));
+    details.appendChild(buildTable(card));
+    body.appendChild(details);
+  };
+
+  if (card.measures.length > 1 && card.form !== "tiles" && card.form !== "table") {
+    const select = html("select");
+    for (const name of card.measures) {
+      const option = html("option", null, name);
+      option.value = name;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => { measure = select.value; draw(); });
+    head.appendChild(select);
+  }
+  if (card.note) head.appendChild(html("p", "note", card.note));
+  section.append(head, body);
+  draw();
+  return section;
+}
+
+const meta = document.getElementById("meta");
+for (const [name, value] of PAYLOAD.keyvalues) {
+  const item = html("span");
+  item.append(html("span", null, name + " "), html("b", null, value));
+  meta.appendChild(item);
+}
+if (!PAYLOAD.cards.length && !PAYLOAD.keyvalues.length) {
+  meta.appendChild(html("span", null, "nothing to show in this response"));
+}
+const host = document.getElementById("cards");
+for (const card of PAYLOAD.cards) host.appendChild(renderCard(card));
+</script>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    args = parse_args()
+    text = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
+    document = build_document(parse_input(text))
+
+    if args.output:
+        output_path = args.output
+    else:
+        handle, name = tempfile.mkstemp(prefix="es-viz-", suffix=".html")
+        os.close(handle)
+        output_path = Path(name)
+
+    output_path.write_text(render_html(document, args.title), encoding="utf-8")
+    if not args.no_open:
+        subprocess.run(["open", str(output_path)], check=False)
+    print(output_path.resolve())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
