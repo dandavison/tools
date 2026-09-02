@@ -11,6 +11,7 @@ with per-message permalinks.
 
 Usage:
   slack-to-md <message-url>                 # a whole thread
+  slack-to-md <message-url> --after         # thread replies after that message
   slack-to-md <channel-url> --limit 200     # recent channel history
   slack-to-md '#team-eng-server' --limit 50 # recent channel history
 """
@@ -31,6 +32,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", help="Slack message URL, #channel, or channel ID")
     parser.add_argument("--limit", type=int, help="max messages (channel history mode)")
+    parser.add_argument(
+        "--after",
+        action="store_true",
+        help="omit thread messages up to and including the one in the URL",
+    )
     parser.add_argument("--workspace", help="workspace selector, if ambiguous")
     args = parser.parse_args()
 
@@ -38,6 +44,9 @@ def main() -> None:
     # agent-slack takes a message URL as-is, but only a bare channel ID (plus workspace)
     # for a channel URL.
     is_thread = bool(url and url.group(3))
+    after = anchor_ts(url) if args.after else None
+    if args.after and after is None:
+        die("--after needs a message URL")
     target = args.target if is_thread or not url else url.group(2)
     workspace = args.workspace or (None if is_thread or not url else url.group(1))
 
@@ -66,6 +75,8 @@ def main() -> None:
     thread_ts = messages[0]["ts"] if is_thread else None
 
     print(header(target, messages, users, thread_ts, host, channel_id))
+    if after:
+        messages = [m for m in messages if m["ts"] > after]
     day = None
     for message in messages:
         when = datetime.fromtimestamp(float(message["ts"]))
@@ -73,6 +84,13 @@ def main() -> None:
             day = when.date()
             print(f"### {day:%A %-d %B %Y}\n")
         print(render(message, when, users, host, channel_id, thread_ts))
+
+
+def anchor_ts(url: re.Match[str] | None) -> str | None:
+    if not (url and (path := url.group(3))):
+        return None
+    digits = path.removeprefix("/p")
+    return f"{digits[:10]}.{digits[10:]}"
 
 
 def header(
