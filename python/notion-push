@@ -117,12 +117,16 @@ def strip_leading_heading(body: str, title: str) -> str:
     return body
 
 
+LIST_ITEM_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s")
+
+
 def unwrap_paragraphs(md: str) -> str:
     """Notion's importer renders a bare newline as a hard line break rather than a
-    CommonMark soft wrap, so a paragraph that's been word-wrapped across physical
-    lines (for readable diffs) shows up as a stack of short, oddly-justified
-    lines. Join such wrapped lines back into one, leaving blank lines, headings,
-    lists, blockquotes, tables, and fenced code untouched."""
+    CommonMark soft wrap, so a paragraph or list item that's been word-wrapped
+    across physical lines (for readable diffs) shows up as a stack of short,
+    oddly-justified lines. Join such wrapped lines back onto the paragraph's or
+    list item's own line, leaving blank lines, headings, blockquotes, tables, and
+    fenced code untouched."""
     out: list[str] = []
     para: list[str] = []
     fenced = False
@@ -140,27 +144,28 @@ def unwrap_paragraphs(md: str) -> str:
         if (
             line.lstrip().startswith("```")
             or not line.strip()
-            or is_block_start(line)
+            or is_lone_block_start(line)
             or line.endswith("  ")
         ):
             flush()
             out.append(line)
             fenced ^= line.lstrip().startswith("```")
             continue
+        if LIST_ITEM_RE.match(line):
+            flush()
         para.append(line.strip())
     flush()
     return "\n".join(out)
 
 
-def is_block_start(line: str) -> bool:
+def is_lone_block_start(line: str) -> bool:
+    """Block starts that are always single physical lines, so unlike list items
+    they never gain a merged continuation."""
     stripped = line.lstrip()
     return bool(
         stripped
         and (
-            stripped.startswith(("#", ">", "|"))
-            or re.match(r"[-*+]\s", stripped)
-            or re.match(r"\d+[.)]\s", stripped)
-            or re.match(r"[-*_]{3,}\s*$", stripped)
+            stripped.startswith(("#", ">", "|")) or re.match(r"[-*_]{3,}\s*$", stripped)
         )
     )
 
