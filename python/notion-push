@@ -62,6 +62,7 @@ def main() -> int:
     if not markdown.strip():
         die("no markdown on stdin")
     title, body = title_and_body(markdown, args.title)
+    body = unwrap_paragraphs(body)
 
     token = notion_cookies(args.profile)["token_v2"]
     parent_id = extract_block_id(args.parent)
@@ -114,6 +115,54 @@ def strip_leading_heading(body: str, title: str) -> str:
     if match and match.group(1).strip() == title:
         return body[match.end() :].lstrip("\n")
     return body
+
+
+def unwrap_paragraphs(md: str) -> str:
+    """Notion's importer renders a bare newline as a hard line break rather than a
+    CommonMark soft wrap, so a paragraph that's been word-wrapped across physical
+    lines (for readable diffs) shows up as a stack of short, oddly-justified
+    lines. Join such wrapped lines back into one, leaving blank lines, headings,
+    lists, blockquotes, tables, and fenced code untouched."""
+    out: list[str] = []
+    para: list[str] = []
+    fenced = False
+
+    def flush() -> None:
+        if para:
+            out.append(" ".join(para))
+            para.clear()
+
+    for line in md.split("\n"):
+        if fenced:
+            out.append(line)
+            fenced ^= line.lstrip().startswith("```")
+            continue
+        if (
+            line.lstrip().startswith("```")
+            or not line.strip()
+            or is_block_start(line)
+            or line.endswith("  ")
+        ):
+            flush()
+            out.append(line)
+            fenced ^= line.lstrip().startswith("```")
+            continue
+        para.append(line.strip())
+    flush()
+    return "\n".join(out)
+
+
+def is_block_start(line: str) -> bool:
+    stripped = line.lstrip()
+    return bool(
+        stripped
+        and (
+            stripped.startswith(("#", ">", "|"))
+            or re.match(r"[-*+]\s", stripped)
+            or re.match(r"\d+[.)]\s", stripped)
+            or re.match(r"[-*_]{3,}\s*$", stripped)
+        )
+    )
 
 
 def notion_cookies(profile: str | None) -> dict[str, str]:
