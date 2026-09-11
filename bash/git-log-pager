@@ -1,6 +1,8 @@
 #!/bin/bash
 trap 'exit 0' INT PIPE
-rg -v '^ [0-9]+ files? changed' | sed $'s/Dan Davison /\e[31m&\e[0m/' | delta
+# gitu renders through delta itself, and reads back the commit records delta
+# emits for the `^▸` commit lines, which is what makes the log navigable.
+rg -v '^ [0-9]+ files? changed' | sed $'s/Dan Davison /\e[31m&\e[0m/' | gitu --pager
 
 
 
