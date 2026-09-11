@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-repo=dandavison/log
+repo=temporalio/dandavison-log
 if [[ "${1:-}" == "-R" ]]; then
     repo="$2"
     shift 2
