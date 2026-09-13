@@ -4,7 +4,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["pytest"]
 # ///
-"""Tests for pr-comments-inline.
+"""Tests for pr-fetch-comments.
 
 Placement is the whole problem, so these drive it directly: --from-json supplies
 normalized threads, bypassing GitHub, and the assertions are on the resulting
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).parent.parent / "python" / "pr-comments-inline"
+SCRIPT_PATH = Path(__file__).parent.parent / "python" / "pr-fetch-comments"
 
 GO_SOURCE = """\
 package main

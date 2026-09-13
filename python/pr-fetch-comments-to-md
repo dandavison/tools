@@ -15,8 +15,8 @@
 # hunk, and replies are nested under the comment they answer.
 #
 # Usage:
-#     pr-comments <github-url | pr-number>   # render comments as markdown
-#     pr-comments --repo owner/name 123      # explicit repo for a bare number
+#     pr-fetch-comments-to-md <github-url | pr-number>   # render comments as markdown
+#     pr-fetch-comments-to-md --repo owner/name 123      # explicit repo for a bare number
 
 import argparse
 import json
@@ -36,7 +36,8 @@ REVIEW_STATE = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="pr-comments", description="Render a GitHub PR's comments as markdown."
+        prog="pr-fetch-comments-to-md",
+        description="Render a GitHub PR's comments as markdown.",
     )
     parser.add_argument("pr", help="GitHub PR URL or number")
     parser.add_argument("--repo", help="owner/name (for a bare PR number)")

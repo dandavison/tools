@@ -14,10 +14,10 @@
 # the file, marked unplaced. Nothing is guessed at.
 #
 # Usage:
-#     pr-comments-inline                    # the PR for the current branch
-#     pr-comments-inline <url | number>     # an explicit PR
-#     pr-comments-inline --remove           # take them all back out
-#     pr-comments-inline --json             # the threads, unplaced, to stdout
+#     pr-fetch-comments                    # the PR for the current branch
+#     pr-fetch-comments <url | number>     # an explicit PR
+#     pr-fetch-comments --remove           # take them all back out
+#     pr-fetch-comments --json             # the threads, unplaced, to stdout
 
 import argparse
 import json
@@ -63,7 +63,7 @@ query($owner:String!, $name:String!, $number:Int!) {
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="pr-comments-inline",
+        prog="pr-fetch-comments",
         description="Write a PR's review threads into the working tree as comments.",
     )
     parser.add_argument("pr", nargs="?", help="GitHub PR URL or number")
