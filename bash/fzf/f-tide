@@ -1,0 +1,14 @@
+#!/bin/bash
+# Pick a project with a tmux window and open one of its tide views (files,
+# search, git, home), as the tide key bindings do from inside the project.
+
+view="$1"
+project="$(wormhole project list --active --name-only | fzf)"
+[ -n "$project" ] || exit
+
+# The project's own window is the one carrying no @view. Target it by window id:
+# project names contain ':', which tmux would parse as session:window.
+window="$(tmux list-windows -a -F '#{window_id}' \
+    -f "#{&&:#{==:#{@project},$project},#{==:#{@view},}}")"
+tmux run-shell -b -t "$window" \
+    "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"

@@ -1,8 +1,4 @@
 #!/bin/bash
-# tmux popups (and bind-key) inherit a stripped PATH, so make the picker's tools
-# reachable regardless of how this is launched.
-export PATH="$HOME/bin:/opt/homebrew/bin:$PATH"
-
 extra_apps=(
     "/System/Applications/System Settings.app"
     "/System/Applications/Utilities/Activity Monitor.app/"
