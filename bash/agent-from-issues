@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# agent-from-issues [-R owner/repo] <issue-number>... [-- <agent> [<arg>...]]
+# agent-from-issues [-R owner/repo] <issue-number-or-url>... [-- <agent> [<arg>...]]
 #
 # Start an interactive agent session (default: claude) with the input buffer
 # pre-seeded with the content of the given GitHub issues (fetched via
@@ -14,27 +14,57 @@
 set -euo pipefail
 
 repo=temporalio/dandavison-log
-if [[ "${1:-}" == "-R" ]]; then
-    repo="$2"
-    shift 2
-fi
-
 issues=()
 agent=(claude)
 while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--" ]]; then
+    if [[ "$1" == "-R" ]]; then
+        if [[ $# -lt 2 ]]; then
+            echo "Error: -R requires an argument" >&2
+            exit 1
+        fi
+        repo="$2"
+        shift 2
+    elif [[ "$1" == "--" ]]; then
         shift
         if [[ $# -gt 0 ]]; then agent=("$@"); fi
         break
+    else
+        issues+=("$1")
+        shift
     fi
-    issues+=("$1")
-    shift
 done
 
 if [[ ${#issues[@]} -eq 0 ]]; then
-    echo "Usage: agent-from-issues [-R owner/repo] <issue-number>... [-- <agent> [<arg>...]]" >&2
+    echo "Usage: agent-from-issues [-R owner/repo] <issue-number-or-url>... [-- <agent> [<arg>...]]" >&2
     exit 1
 fi
+
+urls=()
+labels=()
+for item in "${issues[@]}"; do
+    if [[ "$item" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+        item_owner="${BASH_REMATCH[1]}"
+        item_repo="${BASH_REMATCH[2]}"
+        item_num="${BASH_REMATCH[3]}"
+        full_repo="$item_owner/$item_repo"
+        url="https://github.com/$full_repo/issues/$item_num"
+    elif [[ "$item" =~ ^#?([0-9]+)$ ]]; then
+        item_num="${BASH_REMATCH[1]}"
+        full_repo="$repo"
+        url="https://github.com/$repo/issues/$item_num"
+    else
+        echo "Error: Invalid issue '$item'" >&2
+        echo "Expected issue number or GitHub issue URL" >&2
+        exit 1
+    fi
+
+    if [[ "$full_repo" == "temporalio/dandavison-log" || "$full_repo" == "dandavison/log" ]]; then
+        labels+=("issue #$item_num from my log repo")
+    else
+        labels+=("issue #$item_num from $full_repo")
+    fi
+    urls+=("$url")
+done
 
 if [[ -z "${TMUX:-}" ]]; then
     echo "Error: agent-from-issues must be run inside tmux" >&2
@@ -45,8 +75,8 @@ pane="$TMUX_PANE"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-for n in "${issues[@]}"; do
-    gh-issue-to-md "https://github.com/$repo/issues/$n" > "$tmpdir/$n.md"
+for ((i = 0; i < ${#urls[@]}; i++)); do
+    gh-issue-to-md "${urls[i]}" > "$tmpdir/$i.md"
 done
 
 send_newline() {
@@ -67,10 +97,10 @@ send_newline() {
         sleep 3
     fi
 
-    for n in "${issues[@]}"; do
-        tmux send-keys -t "$pane" -l "Here is the content of issue #$n from my log repo:"
+    for ((i = 0; i < ${#urls[@]}; i++)); do
+        tmux send-keys -t "$pane" -l "Here is the content of ${labels[i]}:"
         send_newline
-        tmux load-buffer -b agent-from-issues "$tmpdir/$n.md"
+        tmux load-buffer -b agent-from-issues "$tmpdir/$i.md"
         tmux paste-buffer -p -d -b agent-from-issues -t "$pane"
         sleep 0.3
         send_newline
