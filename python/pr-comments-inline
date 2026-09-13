@@ -1,0 +1,349 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+#
+# Write a GitHub PR's review threads into the working tree as source comments,
+# so that reading the review is reading an uncommitted diff, and every thread
+# has a file:line an editor or an agent can be pointed at.
+#
+# A thread is placed above its line only when the text there still matches the
+# line the comment was made against; otherwise it goes in a block at the top of
+# the file, marked unplaced. Nothing is guessed at.
+#
+# Usage:
+#     pr-comments-inline                    # the PR for the current branch
+#     pr-comments-inline <url | number>     # an explicit PR
+#     pr-comments-inline --remove           # take them all back out
+#     pr-comments-inline --json             # the threads, unplaced, to stdout
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+MARKER = "⬇️"
+WIDTH = 88
+TAB = 4
+
+LINE_COMMENT = {
+    "//": "c cc cpp cs cxx dart go groovy gradle h hpp java js jsx kt kts m mm php"
+    " proto rs scala sol swift ts tsx v zig",
+    "#": "bash cfg conf dockerfile fish gitignore jl nix pl pp ps1 py r rb sh toml"
+    " tf yaml yml zsh",
+    "--": "ada elm hs lua sql",
+    ";": "asm clj cljs el ini lisp scm",
+    "%": "erl tex",
+}
+BLOCK_COMMENT = {
+    ("<!--", "-->"): "htm html markdown md svg vue xhtml xml",
+    ("/*", "*/"): "css less scss",
+}
+BY_FILENAME = {"dockerfile": "#", "makefile": "#", "rakefile": "#"}
+
+QUERY = """
+query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      headRefOid
+      reviewThreads(first:100) { nodes {
+        isResolved path line diffSide
+        comments(first:100) { nodes { author { login } body diffHunk url } }
+      } }
+    }
+  }
+}
+"""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="pr-comments-inline",
+        description="Write a PR's review threads into the working tree as comments.",
+    )
+    parser.add_argument("pr", nargs="?", help="GitHub PR URL or number")
+    parser.add_argument("--remove", action="store_true", help="strip them and stop")
+    parser.add_argument(
+        "--json", action="store_true", help="dump threads, write nothing"
+    )
+    parser.add_argument("--from-json", metavar="FILE", help="place threads from FILE")
+    parser.add_argument(
+        "--resolved", action="store_true", help="include resolved threads"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="allow a dirty working tree"
+    )
+    args = parser.parse_args()
+
+    root = git_root()
+    if args.remove:
+        print(f"stripped {strip_markers(root)} files", file=sys.stderr)
+        return 0
+
+    threads = (
+        json.loads(Path(args.from_json).read_text())
+        if args.from_json
+        else fetch_threads(*resolve_pr(args.pr))
+    )
+    if args.json:
+        print(json.dumps(threads, indent=2))
+        return 0
+
+    strip_markers(root)
+    if not args.force:
+        require_clean(root)
+    place(threads, root, include_resolved=args.resolved)
+    return 0
+
+
+def place(threads: list[dict], root: Path, include_resolved: bool) -> None:
+    wanted = [t for t in threads if include_resolved or not t["isResolved"]]
+    wanted.sort(key=lambda t: (t["path"], t["line"] or 0))
+    numbered = list(enumerate(wanted, start=1))
+
+    placed = unplaced = 0
+    for path in dict.fromkeys(t["path"] for _, t in numbered):
+        file = root / path
+        syntax = comment_syntax(file)
+        if syntax is None or not file.is_file():
+            print(f"skipped {path}: no known comment syntax", file=sys.stderr)
+            continue
+        for_file = [(n, t) for n, t in numbered if t["path"] == path]
+        n_placed = write_file(file, for_file, syntax)
+        placed += n_placed
+        unplaced += len(for_file) - n_placed
+
+    skipped = len(threads) - len(wanted)
+    print(f"{placed} placed, {unplaced} unplaced, {skipped} resolved", file=sys.stderr)
+
+
+def write_file(
+    file: Path, threads: list[tuple[int, dict]], syntax: tuple[str, str]
+) -> int:
+    text = file.read_text()
+    lines = text.splitlines()
+    at_top: list[tuple[int, dict]] = []
+    anchored: list[tuple[int, int, dict]] = []
+    for n, thread in threads:
+        index = target_index(thread, lines)
+        if index is None:
+            at_top.append((n, thread))
+        else:
+            anchored.append((index, n, thread))
+
+    for index, n, thread in sorted(anchored, reverse=True):
+        indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+        lines[index:index] = render(n, thread, indent, syntax, unplaced=False)
+
+    top = 1 if lines and lines[0].startswith("#!") else 0
+    for n, thread in reversed(at_top):
+        lines[top:top] = render(n, thread, "", syntax, unplaced=True)
+
+    file.write_text("\n".join(lines) + ("\n" if text.endswith("\n") else ""))
+    return len(anchored)
+
+
+def target_index(thread: dict, lines: list[str]) -> int | None:
+    """The 0-based line to comment above, if the file still says what it said."""
+    if thread["side"] != "RIGHT" or thread["line"] is None:
+        return None
+    index = thread["line"] - 1
+    if not 0 <= index < len(lines):
+        return None
+    return index if lines[index] == anchor_text(thread["diffHunk"]) else None
+
+
+def anchor_text(diff_hunk: str) -> str:
+    """A hunk ends at the line the comment was made against."""
+    last = diff_hunk.splitlines()[-1]
+    return last[1:] if last[:1] in ("+", "-", " ") else last
+
+
+def render(
+    n: int, thread: dict, indent: str, syntax: tuple[str, str], unplaced: bool
+) -> list[str]:
+    open_, close = syntax
+    head = f"{indent}{open_} {MARKER}"
+    tail = f" {close}" if close else ""
+    body_width = max(20, WIDTH - len(head.expandtabs(TAB)) - len(tail) - 1)
+
+    def emit(text: str) -> str:
+        return (f"{head} {text}" if text else head) + tail
+
+    note = ""
+    if thread["isResolved"]:
+        note += " · resolved"
+    if unplaced:
+        where = f" (was {thread['path']}:{thread['line']})" if thread["line"] else ""
+        note += f" · unplaced{where}"
+
+    out = []
+    for i, comment in enumerate(thread["comments"]):
+        if i:
+            out.append(emit(""))
+        out.append(
+            emit(f"[{n}] {comment['author']}{note}" if i == 0 else comment["author"])
+        )
+        out.extend(emit(line) for line in wrap(comment["body"], body_width))
+    out.append(emit(thread["url"]))
+    return out
+
+
+def wrap(body: str, width: int) -> list[str]:
+    """Wrap prose; pass fenced code through, since a review often suggests code."""
+    out: list[str] = []
+    fenced = False
+    for line in body.replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced or line.lstrip().startswith("```") or not line.strip():
+            out.append(line.rstrip())
+        else:
+            out.extend(textwrap.wrap(line, width))
+    return out
+
+
+def comment_syntax(file: Path) -> tuple[str, str] | None:
+    extension = file.suffix.lstrip(".").lower()
+    for prefix, extensions in LINE_COMMENT.items():
+        if extension in extensions.split():
+            return prefix, ""
+    for pair, extensions in BLOCK_COMMENT.items():
+        if extension in extensions.split():
+            return pair
+    prefix = BY_FILENAME.get(file.name.lower())
+    return (prefix, "") if prefix else None
+
+
+OURS = re.compile(r"^\s*(?://|#|--|;|%|<!--|/\*)\s" + re.escape(MARKER) + r"(?:\s|$)")
+
+
+def strip_markers(root: Path) -> int:
+    stripped = 0
+    for path in marker_files(root):
+        file = root / path
+        text = file.read_text()
+        lines = text.splitlines()
+        kept = [line for line in lines if not OURS.match(line)]
+        if len(kept) == len(lines):
+            continue
+        file.write_text("\n".join(kept) + ("\n" if text.endswith("\n") else ""))
+        stripped += 1
+    return stripped
+
+
+def marker_files(root: Path) -> list[str]:
+    """git grep, so this stays cheap in a big repo and never sees a submodule."""
+    found = subprocess.run(
+        ["git", "grep", "-lzF", MARKER],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if found.returncode == 1:
+        return []
+    if found.returncode != 0:
+        sys.exit(found.stderr.strip() or "git grep failed")
+    return [p for p in found.stdout.split("\0") if p]
+
+
+def require_clean(root: Path) -> None:
+    dirty = git(["status", "--porcelain", "--untracked-files=no"], root).strip()
+    if dirty:
+        sys.exit(
+            "working tree is not clean; commit or stash first, or pass --force:\n"
+            + dirty
+        )
+
+
+def resolve_pr(pr: str | None) -> tuple[str, str, int]:
+    if pr is None:
+        found = json.loads(gh(["pr", "view", "--json", "url"]))["url"]
+        return resolve_pr(found)
+    match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr)
+    if match:
+        return match.group(1), match.group(2), int(match.group(3))
+    if not pr.isdigit():
+        sys.exit(f"error: not a PR URL or number: {pr}")
+    repo = gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+    owner, name = repo.strip().split("/", 1)
+    return owner, name, int(pr)
+
+
+def fetch_threads(owner: str, name: str, number: int) -> list[dict]:
+    data = json.loads(
+        gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={QUERY}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={number}",
+            ]
+        )
+    )["data"]["repository"]["pullRequest"]
+    warn_if_stale(data["headRefOid"])
+    return [normalize(node) for node in data["reviewThreads"]["nodes"]]
+
+
+def normalize(node: dict) -> dict:
+    comments = node["comments"]["nodes"]
+    return {
+        "path": node["path"],
+        "line": node["line"],
+        "side": node["diffSide"],
+        "isResolved": node["isResolved"],
+        "diffHunk": comments[0]["diffHunk"],
+        "url": comments[0]["url"],
+        "comments": [
+            {"author": (c["author"] or {}).get("login", "ghost"), "body": c["body"]}
+            for c in comments
+        ],
+    }
+
+
+def warn_if_stale(head: str) -> None:
+    local = git(["rev-parse", "HEAD"], git_root()).strip()
+    if local != head:
+        print(
+            f"note: HEAD {local[:8]} is not the PR head {head[:8]}; "
+            "threads whose line no longer matches will be left unplaced",
+            file=sys.stderr,
+        )
+
+
+def git_root() -> Path:
+    return Path(git(["rev-parse", "--show-toplevel"], Path.cwd()).strip())
+
+
+def git(args: list[str], cwd: Path) -> str:
+    return run(["git", *args], cwd=cwd)
+
+
+def gh(args: list[str]) -> str:
+    return run(["gh", *args], cwd=None)
+
+
+def run(args: list[str], cwd: Path | None) -> str:
+    result = subprocess.run(
+        args, cwd=cwd, capture_output=True, text=True, timeout=60, check=False
+    )
+    if result.returncode != 0:
+        sys.exit(result.stderr.strip() or f"{' '.join(args[:2])} failed")
+    return result.stdout
+
+
+if __name__ == "__main__":
+    sys.exit(main())

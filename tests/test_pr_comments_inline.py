@@ -62,17 +62,20 @@ def thread(
         "diffHunk": "@@ -5,4 +5,5 @@ func run() error {\n" + "+" + anchor,
         "url": f"https://github.com/o/r/pull/1#discussion_r{n}",
         "comments": [
-            {"author": a, "body": b} for a, b in (comments or [("bergundy", "handle it")])
+            {"author": a, "body": b}
+            for a, b in (comments or [("bergundy", "handle it")])
         ],
     }
 
 
-def run_tool(tmp_path: Path, threads: list[dict], *args: str) -> subprocess.CompletedProcess:
-    threads_file = tmp_path / "threads.json"
+def run_tool(
+    repo: Path, threads: list[dict], *args: str
+) -> subprocess.CompletedProcess:
+    threads_file = repo.parent / "threads.json"
     threads_file.write_text(json.dumps(threads))
     return subprocess.run(
         [str(SCRIPT_PATH), "--from-json", str(threads_file), *args],
-        cwd=tmp_path,
+        cwd=repo,
         capture_output=True,
         text=True,
         timeout=60,
@@ -82,16 +85,18 @@ def run_tool(tmp_path: Path, threads: list[dict], *args: str) -> subprocess.Comp
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    (tmp_path / "sample.go").write_text(GO_SOURCE)
-    (tmp_path / "script.py").write_text(PY_SOURCE)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "sample.go").write_text(GO_SOURCE)
+    (root / "script.py").write_text(PY_SOURCE)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
-        cwd=tmp_path,
+        cwd=root,
         check=True,
     )
-    return tmp_path
+    return root
 
 
 def test_a_thread_is_written_above_its_line_at_that_lines_indentation(repo: Path):
@@ -121,9 +126,10 @@ def test_replies_are_kept_in_one_block_separated_by_a_bare_marker(repo: Path):
 def test_the_comment_prefix_follows_the_files_language(repo: Path):
     threads = [thread(path="script.py", line=4, anchor="    return 1")]
     assert run_tool(repo, threads).returncode == 0
-    assert "    # ⬇️ [1] bergundy\n    # ⬇️ handle it\n    return 1" in (
-        repo / "script.py"
-    ).read_text()
+    assert (
+        "    # ⬇️ [1] bergundy\n    # ⬇️ handle it\n    # ⬇️ https"
+        in (repo / "script.py").read_text()
+    )
 
 
 def test_a_thread_whose_line_no_longer_matches_goes_to_a_header_block(repo: Path):
@@ -145,8 +151,10 @@ def test_a_left_side_thread_is_unplaceable_in_the_working_tree(repo: Path):
 def test_a_header_block_goes_below_a_shebang(repo: Path):
     threads = [thread(path="script.py", line=None)]
     assert run_tool(repo, threads).returncode == 0
-    assert (repo / "script.py").read_text().startswith(
-        "#!/usr/bin/env python3\n# ⬇️ [1] bergundy · unplaced"
+    assert (
+        (repo / "script.py")
+        .read_text()
+        .startswith("#!/usr/bin/env python3\n# ⬇️ [1] bergundy · unplaced")
     )
 
 
@@ -161,9 +169,7 @@ def test_long_bodies_are_wrapped_and_every_line_carries_the_marker(repo: Path):
     body = "the retry loop spins forever here because the error is swallowed " * 3
     assert run_tool(repo, [thread(comments=[("bergundy", body)])]).returncode == 0
     block = [
-        line
-        for line in (repo / "sample.go").read_text().splitlines()
-        if "⬇️" in line
+        line for line in (repo / "sample.go").read_text().splitlines() if "⬇️" in line
     ]
     assert len(block) > 4
     assert all(line.lstrip().startswith("// ⬇️") for line in block)
@@ -172,9 +178,13 @@ def test_long_bodies_are_wrapped_and_every_line_carries_the_marker(repo: Path):
 
 def test_remove_restores_the_file_exactly(repo: Path):
     assert run_tool(repo, [thread()]).returncode == 0
-    assert subprocess.run(
-        [str(SCRIPT_PATH), "--remove"], cwd=repo, capture_output=True, timeout=60
-    ).returncode == 0
+    subprocess.run(
+        [str(SCRIPT_PATH), "--remove"],
+        cwd=repo,
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
     assert (repo / "sample.go").read_text() == GO_SOURCE
 
 
