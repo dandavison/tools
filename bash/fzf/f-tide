@@ -1,14 +1,37 @@
 #!/bin/bash
-# Pick a project with a tmux window and open one of its tide views (files,
-# search, git, home), as the tide key bindings do from inside the project.
+# Pick any wormhole project, opening it if it has no tmux window yet, and go to
+# one of its tide views (files, search, git, home), as the tide key bindings do
+# from inside the project.
 
 view="$1"
-project="$(wormhole project list --active --name-only | fzf)"
-[ -n "$project" ] || exit
 
-# The project's own window is the one carrying no @view. Target it by window id:
+main() {
+    local project window
+    project="$(projects | fzf)"
+    [ -n "$project" ] || exit
+    window="$(project_window "$project")"
+    if [ -z "$window" ]; then
+        wormhole open "$project" --land-in terminal || exit
+        window="$(project_window "$project")"
+    fi
+    tmux run-shell -b -t "$window" \
+        "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"
+}
+
+# The projects and tasks wormhole is tracking, then every other repo it could
+# open.
+projects() {
+    {
+        wormhole project list --name-only
+        wormhole project list --available --name-only
+    } | awk '!seen[$0]++'
+}
+
+# A project's own window is the one carrying no @view. Target it by window id:
 # project names contain ':', which tmux would parse as session:window.
-window="$(tmux list-windows -a -F '#{window_id}' \
-    -f "#{&&:#{==:#{@project},$project},#{==:#{@view},}}")"
-tmux run-shell -b -t "$window" \
-    "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"
+project_window() {
+    tmux list-windows -a -F '#{window_id}' \
+        -f "#{&&:#{==:#{@project},$1},#{==:#{@view},}}"
+}
+
+main
