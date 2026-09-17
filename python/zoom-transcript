@@ -1,0 +1,197 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pycookiecheat>=0.8", "httpx"]
+# ///
+"""Print the transcript of a Zoom cloud recording share link, as Markdown.
+
+Reads your Chrome zoom.us session cookies (via pycookiecheat) and drives the
+private API the recording player uses: share page -> share-info -> play page ->
+play/info -> transcript VTT.
+
+Usage:
+  zoom-transcript <zoom-share-url> [--passcode PASSCODE] [--vtt] [--profile "Profile 1"]
+
+A recording protected by a passcode needs --passcode, unless you already entered
+it in Chrome for that recording.
+"""
+
+import argparse
+import re
+import sys
+import urllib.parse
+from pathlib import Path
+from typing import Any, NoReturn
+
+import httpx
+from pycookiecheat import chrome_cookies
+
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("url", help="https://<subdomain>.zoom.us/rec/share/...")
+    ap.add_argument("--passcode", help="recording passcode")
+    ap.add_argument("--vtt", action="store_true", help="emit raw WebVTT")
+    ap.add_argument(
+        "--profile", help='Chrome profile, e.g. "Profile 1" (default: Default)'
+    )
+    args = ap.parse_args()
+
+    origin = re.match(r"(https://[^/]+)", args.url)
+    if not origin or "/rec/share/" not in args.url:
+        die(f"not a Zoom recording share URL: {args.url}")
+    origin = origin.group(1)
+
+    with httpx.Client(
+        cookies=zoom_cookies(origin, args.profile),
+        headers={"User-Agent": UA, "Referer": args.url},
+        follow_redirects=True,
+        timeout=60,
+    ) as client:
+        vtt = fetch_transcript_vtt(client, origin, args.url, args.passcode)
+
+    sys.stdout.write(vtt if args.vtt else to_markdown(vtt))
+    return 0
+
+
+def fetch_transcript_vtt(
+    client: httpx.Client, origin: str, share_url: str, passcode: str | None
+) -> str:
+    share_info = get_share_info(client, origin, share_url)
+    if share_info.get("componentName") == "need-password":
+        if not passcode:
+            die(f"recording needs a passcode: {share_url}")
+        submit_passcode(client, origin, share_info, passcode)
+        share_info = get_share_info(client, origin, share_url)
+        if share_info.get("componentName") == "need-password":
+            die(f"passcode rejected: {share_url}")
+
+    redirect = share_info.get("redirectUrl")
+    if not redirect:
+        die(f"share-info gave no redirectUrl: {share_info}")
+
+    file_id = player_data(client.get(origin + redirect).text).get("fileId")
+    if not file_id:
+        die(f"no fileId on play page {redirect}")
+
+    info = get_json(
+        client,
+        f"{origin}/nws/recording/1.0/play/info/{file_id}"
+        f"?canPlayFromShare=true&from=share&continueMode=true"
+        f"&componentName=rec-play&originDomain={origin}&accessLevel=meeting",
+    )
+    if not info.get("transcriptUrl"):
+        die(f"recording has no transcript: {share_url}")
+    return client.get(origin + info["transcriptUrl"]).text
+
+
+def get_share_info(client: httpx.Client, origin: str, share_url: str) -> dict[str, Any]:
+    meeting_id = player_data(client.get(share_url).text).get("meetingId")
+    if not meeting_id:
+        die(f"no meetingId on share page; not logged in or link is dead: {share_url}")
+    return get_json(
+        client,
+        f"{origin}/nws/recording/1.0/play/share-info/{meeting_id}"
+        f"?originDomain={origin}&accessLevel=meeting",
+    )
+
+
+def submit_passcode(
+    client: httpx.Client, origin: str, share_info: dict[str, Any], passcode: str
+) -> None:
+    """The passcode is checked against a meeting id minted by the passcode page itself."""
+    query = urllib.parse.urlencode(
+        {
+            k: v
+            for k, v in share_info.items()
+            if v is not None and k not in ("needRedirect", "redirectUrl")
+        }
+    )
+    page = client.get(f"{origin}{share_info['redirectUrl']}?{query}")
+    meeting_id = player_data(page.text).get("meeting_id")
+    if not meeting_id:
+        die("no meeting_id on passcode page")
+    response = client.post(
+        f"{origin}/nws/recording/1.0/validate-meeting-passwd",
+        data={
+            "id": meeting_id,
+            "passwd": passcode,
+            "action": share_info.get("action", ""),
+            "recaptcha": "",
+        },
+        headers={"X-Requested-With": "XMLHttpRequest", "Referer": str(page.url)},
+    ).json()
+    if not response.get("status"):
+        die(f"passcode rejected: {response.get('errorMessage')}")
+
+
+def get_json(client: httpx.Client, url: str) -> dict[str, Any]:
+    body = client.get(url).json()
+    if not body.get("status"):
+        die(f"{url}: {body.get('errorMessage')}")
+    return body["result"]
+
+
+def player_data(html: str) -> dict[str, str]:
+    blob = re.search(r"window\.__data__ = \{(.*?)\n\};", html, re.DOTALL)
+    if not blob:
+        return {}
+    return dict(re.findall(r"""(\w+):\s*["']([^"']*)["']""", blob.group(1)))
+
+
+def to_markdown(vtt: str) -> str:
+    """Speaker-grouped paragraphs, each prefixed with the time of its first cue."""
+    out: list[str] = []
+    speaker = None
+    for start, text in parse_cues(vtt):
+        cue_speaker, sep, cue_text = text.partition(": ")
+        if not sep:
+            cue_speaker, cue_text = "", text
+        if cue_speaker != speaker:
+            speaker = cue_speaker
+            out.append(f"\n**{speaker or 'unknown'}** [{start}]\n")
+        out.append(cue_text)
+    return "\n".join(out).strip() + "\n"
+
+
+def parse_cues(vtt: str) -> list[tuple[str, str]]:
+    cues = []
+    for block in vtt.replace("\r\n", "\n").split("\n\n"):
+        lines = [line for line in block.strip().splitlines() if line]
+        if len(lines) >= 2 and "-->" in lines[-2]:
+            start = lines[-2].split(" --> ")[0].split(".")[0].removeprefix("00:")
+            cues.append((start, lines[-1]))
+    return cues
+
+
+def zoom_cookies(origin: str, profile: str | None) -> dict[str, str]:
+    cookie_file = None
+    if profile:
+        cookie_file = (
+            Path.home()
+            / "Library/Application Support/Google/Chrome"
+            / profile
+            / "Cookies"
+        )
+    cookies = chrome_cookies(origin, cookie_file=cookie_file)
+    if not cookies.get("_zm_ssid"):
+        die(
+            f"no _zm_ssid cookie for {origin}; log into Zoom in Chrome"
+            + (f" ({profile})" if profile else "")
+        )
+    return cookies
+
+
+def die(msg: str) -> NoReturn:
+    print(f"zoom-transcript: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
