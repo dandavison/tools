@@ -385,19 +385,27 @@ def fmt_time(ms: Any) -> str:
 
 
 def api_post(path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
-    req = urllib.request.Request(
-        f"{API}/{path}",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Cookie": f"token_v2={token}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        die(
-            f"POST {path} -> {e.code} {e.reason}: {e.read().decode(errors='replace')[:500]}"
+    """Notion rate limits exports, so 429s are retried with a growing delay."""
+    for attempt in range(1, 6):
+        req = urllib.request.Request(
+            f"{API}/{path}",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Cookie": f"token_v2={token}"},
+            method="POST",
         )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == 5:
+                die(
+                    f"POST {path} -> {e.code} {e.reason}: "
+                    f"{e.read().decode(errors='replace')[:500]}"
+                )
+            delay = 15 * attempt
+            log(f"  {path} rate limited, retrying in {delay}s")
+            time.sleep(delay)
+    die(f"POST {path} rate limited")
 
 
 def local_timezone() -> str:
