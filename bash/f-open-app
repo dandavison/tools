@@ -2,6 +2,7 @@
 extra_apps=(
     "/System/Applications/System Settings.app"
     "/System/Applications/Utilities/Activity Monitor.app/"
+    "/System/Applications/Utilities/Terminal.app/"
 )
 
 pick() {
