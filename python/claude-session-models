@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Print the model responsible for each turn of one Claude Code session.
 
 The session is identified by its ID (full or unique prefix) or by its name

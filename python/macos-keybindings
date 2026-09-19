@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Dump every keyboard shortcut macOS itself has registered.
 
 Reads the actual preference stores the system uses, so nothing has to be found
@@ -26,7 +31,7 @@ Usage:
     macos-keybindings --json           # machine-readable, for diffing two hosts
 """
 
-from __future__ import annotations  # system python is still 3.9 on a fresh Mac
+from __future__ import annotations
 
 import argparse
 import glob
