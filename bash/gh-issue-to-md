@@ -9,9 +9,9 @@ fi
 
 url="$1"
 
-# Accept bare issue numbers defaulting to dandavison/log
+# Accept bare issue numbers defaulting to temporalio/dandavison-log
 if [[ "$url" =~ ^[0-9]+$ ]]; then
-    url="https://github.com/dandavison/log/issues/$url"
+    url="https://github.com/temporalio/dandavison-log/issues/$url"
 fi
 
 # Parse GitHub issue URL
