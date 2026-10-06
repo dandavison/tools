@@ -14,6 +14,9 @@ main() {
         wormhole open "$project" --land-in terminal || exit
         window="$(project_window "$project")"
     fi
+    # Select the project's window first so that it, not the window the popup
+    # was opened from, is tmux's last window when the view window closes.
+    tmux select-window -t "$window"
     tmux run-shell -b -t "$window" \
         "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"
 }
