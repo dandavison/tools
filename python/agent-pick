@@ -7,7 +7,8 @@
 """Choose a model from ~/.config/agent-models.toml (fzf, or by name) and print it as JSON.
 
 Output: {"name", "cli", "model", "env", "price"}, where env holds the account's variables if
---personal, and price is the model's USD per million tokens, or null.
+--personal, and price is the model's USD per million tokens (from the OpenRouter model list
+cached by agent-prices-refresh), or null if the model has no `openrouter` id.
 Models with a `health` URL are offered only if that URL responds.
 """
 
@@ -18,11 +19,15 @@ import subprocess
 import sys
 import tomllib
 import urllib.request
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 CONFIG_PATH = Path(
     os.environ.get("AGENT_MODELS", "~/.config/agent-models.toml")
+).expanduser()
+PRICES_PATH = Path(
+    os.environ.get("AGENT_PRICES", "~/.cache/agent-prices/openrouter-models.json")
 ).expanduser()
 
 
@@ -47,7 +52,7 @@ def main() -> None:
                 "cli": model["cli"],
                 "model": model["model"],
                 "env": {k: str(Path(v).expanduser()) for k, v in env.items()},
-                "price": model.get("price"),
+                "price": price(model["openrouter"]) if "openrouter" in model else None,
             }
         )
     )
@@ -68,6 +73,24 @@ def format_rows(models: list[dict[str, Any]]) -> str:
     return "".join(
         f"{m['name']:<{width}}  {m['cli']:<6}  {m['model']}\n" for m in models
     )
+
+
+def price(openrouter_id: str) -> dict[str, float]:
+    if not PRICES_PATH.exists():
+        sys.exit(f"agent-pick: {PRICES_PATH} not found; run agent-prices-refresh")
+    for entry in json.loads(PRICES_PATH.read_text())["data"]:
+        if entry["id"] == openrouter_id:
+            per_token = entry["pricing"]
+            return {
+                key: float(Decimal(per_token[openrouter_key]) * 1_000_000)
+                for key, openrouter_key in [
+                    ("input", "prompt"),
+                    ("cached_input", "input_cache_read"),
+                    ("cache_write", "input_cache_write"),
+                    ("output", "completion"),
+                ]
+            }
+    sys.exit(f"agent-pick: {openrouter_id} not in {PRICES_PATH}")
 
 
 def fzf(models: list[dict[str, Any]], personal: bool) -> str:

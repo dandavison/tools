@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# Cache OpenRouter's model list, which agent-pick uses for prices.
+set -euo pipefail
+
+cache=~/.cache/agent-prices/openrouter-models.json
+mkdir -p "$(dirname "$cache")"
+curl -fsS https://openrouter.ai/api/v1/models > "$cache.tmp"
+mv "$cache.tmp" "$cache"
+echo "$cache: $(jq '.data | length' "$cache") models"
