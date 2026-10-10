@@ -1,0 +1,3 @@
+#!/usr/bin/env -S agent-run --no-tools
+Reply with exactly one zsh command line, for macOS, that does what the input describes. Reply
+with the command only: no explanation, no code fences.

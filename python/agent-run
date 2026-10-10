@@ -11,7 +11,8 @@
 
 A prompt script starts with e.g. `#!/usr/bin/env -S agent-run -m luna`. The model is
 $AGENT_MODEL if set, else -m MODEL, else chosen with fzf if there is a terminal.
-The answer goes to stdout; tool calls and cost go to stderr.
+The answer goes to stdout; tool calls and cost go to stderr. --no-tools disables tools for
+claude and pi; codex cannot disable them, so it gets a read-only sandbox instead.
 """
 
 import argparse
@@ -31,6 +32,7 @@ def main() -> None:
     )
     parser.add_argument("--personal", action="store_true")
     parser.add_argument("-m", dest="model")
+    parser.add_argument("--no-tools", action="store_true")
     parser.add_argument("file", nargs="?", type=Path)
     parser.add_argument("args", nargs="*")
     args = parser.parse_args()
@@ -39,7 +41,7 @@ def main() -> None:
     os.environ.update(pick["env"])
     prompt = script_prompt(args.file, args.args) if args.file else terminal_prompt()
     run = {"claude": run_claude, "codex": run_codex, "pi": run_pi}[pick["cli"]]
-    sys.exit(run(pick, prompt))
+    sys.exit(run(pick, prompt, args.no_tools))
 
 
 def pick_model(name: str | None, personal: bool) -> dict[str, Any]:
@@ -78,8 +80,9 @@ def terminal_prompt() -> str:
     ).stdout
 
 
-def run_claude(pick: dict[str, Any], prompt: str) -> int:
+def run_claude(pick: dict[str, Any], prompt: str, no_tools: bool) -> int:
     cmd = ["claude", "--model", pick["model"], "--print", "--no-session-persistence"]
+    cmd += ["--tools", ""] if no_tools else []
     cmd += ["--output-format", "stream-json", "--verbose", prompt]
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True) as proc:
         progress = Progress()
@@ -101,8 +104,9 @@ def run_claude(pick: dict[str, Any], prompt: str) -> int:
     return proc.returncode
 
 
-def run_codex(pick: dict[str, Any], prompt: str) -> int:
+def run_codex(pick: dict[str, Any], prompt: str, no_tools: bool) -> int:
     cmd = ["codex", "exec", "--model", pick["model"], "--skip-git-repo-check"]
+    cmd += ["--sandbox", "read-only"] if no_tools else []
     cmd += ["--ephemeral", "--json", prompt]
     # Codex logs to stderr; its errors also appear as events in the JSON stream.
     with subprocess.Popen(
@@ -128,8 +132,10 @@ def run_codex(pick: dict[str, Any], prompt: str) -> int:
     return proc.returncode
 
 
-def run_pi(pick: dict[str, Any], prompt: str) -> int:
-    cmd = ["pi", "--model", pick["model"], "--print", "--no-session", prompt]
+def run_pi(pick: dict[str, Any], prompt: str, no_tools: bool) -> int:
+    cmd = ["pi", "--model", pick["model"], "--print", "--no-session"]
+    cmd += ["--no-tools"] if no_tools else []
+    cmd += [prompt]
     return subprocess.run(cmd, check=False).returncode
 
 
