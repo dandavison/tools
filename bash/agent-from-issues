@@ -1,0 +1,97 @@
+#!/bin/bash
+#
+# agent-from-issues [-R owner/repo] [--personal] [-m MODEL] <issue-number-or-url>... [-- <agent> [<arg>...]]
+#
+# Start an interactive agent session (model chosen via agent-pick, unless an
+# explicit agent command follows "--") with the input buffer
+# pre-seeded with the content of the given GitHub issues (fetched via
+# gh-issue-to-md), via agent-with-input. Nothing is submitted.
+#
+# All issues plus their labels go into a single paste, so the labels are
+# collapsed into the placeholder along with the content rather than being
+# visible in the pane.
+
+set -euo pipefail
+
+repo=temporalio/dandavison-log
+issues=()
+pick_args=()
+agent=()
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "-R" ]]; then
+        if [[ $# -lt 2 ]]; then
+            echo "Error: -R requires an argument" >&2
+            exit 1
+        fi
+        repo="$2"
+        shift 2
+    elif [[ "$1" == "--personal" ]]; then
+        pick_args+=(--personal)
+        shift
+    elif [[ "$1" == "-m" ]]; then
+        if [[ $# -lt 2 ]]; then
+            echo "Error: -m requires an argument" >&2
+            exit 1
+        fi
+        pick_args+=("$2")
+        shift 2
+    elif [[ "$1" == "--" ]]; then
+        shift
+        if [[ $# -gt 0 ]]; then agent=("$@"); fi
+        break
+    else
+        issues+=("$1")
+        shift
+    fi
+done
+
+if [[ ${#issues[@]} -eq 0 ]]; then
+    echo "Usage: agent-from-issues [-R owner/repo] [--personal] [-m MODEL] <issue-number-or-url>... [-- <agent> [<arg>...]]" >&2
+    exit 1
+fi
+
+urls=()
+labels=()
+for item in "${issues[@]}"; do
+    if [[ "$item" =~ github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
+        item_owner="${BASH_REMATCH[1]}"
+        item_repo="${BASH_REMATCH[2]}"
+        item_num="${BASH_REMATCH[3]}"
+        full_repo="$item_owner/$item_repo"
+        url="https://github.com/$full_repo/issues/$item_num"
+    elif [[ "$item" =~ ^#?([0-9]+)$ ]]; then
+        item_num="${BASH_REMATCH[1]}"
+        full_repo="$repo"
+        url="https://github.com/$repo/issues/$item_num"
+    else
+        echo "Error: Invalid issue '$item'" >&2
+        echo "Expected issue number or GitHub issue URL" >&2
+        exit 1
+    fi
+
+    if [[ "$full_repo" == "temporalio/dandavison-log" || "$full_repo" == "dandavison/log" ]]; then
+        labels+=("issue #$item_num from my log repo")
+    else
+        labels+=("issue #$item_num from $full_repo")
+    fi
+    urls+=("$url")
+done
+
+if [[ ${#agent[@]} -eq 0 ]]; then
+    pick="$(agent-pick ${pick_args[@]+"${pick_args[@]}"})"
+    while IFS= read -r kv; do export "$kv"; done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<<"$pick")
+    agent=("$(jq -r .cli <<<"$pick")" --model "$(jq -r .model <<<"$pick")")
+fi
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+for ((i = 0; i < ${#urls[@]}; i++)); do
+    {
+        echo "Here is the content of ${labels[i]}:"
+        gh-issue-to-md "${urls[i]}"
+        echo
+    } >> "$tmpdir/prompt.md"
+done
+
+agent-with-input -- "${agent[@]}" < "$tmpdir/prompt.md"
