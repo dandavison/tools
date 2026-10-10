@@ -51,6 +51,7 @@ def run(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(SCRIPT_PATH), *args],
         capture_output=True,
+        check=False,
         text=True,
         env={**os.environ, "AGENT_MODELS": str(config)},
     )
@@ -59,7 +60,12 @@ def run(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def test_pick_by_name(config: Path) -> None:
     result = run(config, "luna")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"name": "luna", "cli": "codex", "model": "gpt-6-luna", "env": {}}
+    assert json.loads(result.stdout) == {
+        "name": "luna",
+        "cli": "codex",
+        "model": "gpt-6-luna",
+        "env": {},
+    }
 
 
 def test_personal_sets_account_env(config: Path) -> None:

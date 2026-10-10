@@ -1,8 +1,9 @@
 #!/bin/bash
 #
-# agent-from-issues [-R owner/repo] <issue-number-or-url>... [-- <agent> [<arg>...]]
+# agent-from-issues [-R owner/repo] [--personal] [-m MODEL] <issue-number-or-url>... [-- <agent> [<arg>...]]
 #
-# Start an interactive agent session (default: claude) with the input buffer
+# Start an interactive agent session (model chosen via agent-pick, unless an
+# explicit agent command follows "--") with the input buffer
 # pre-seeded with the content of the given GitHub issues (fetched via
 # gh-issue-to-md), via agent-with-input. Nothing is submitted.
 #
@@ -14,7 +15,8 @@ set -euo pipefail
 
 repo=temporalio/dandavison-log
 issues=()
-agent=(claude)
+pick_args=()
+agent=()
 while [[ $# -gt 0 ]]; do
     if [[ "$1" == "-R" ]]; then
         if [[ $# -lt 2 ]]; then
@@ -22,6 +24,16 @@ while [[ $# -gt 0 ]]; do
             exit 1
         fi
         repo="$2"
+        shift 2
+    elif [[ "$1" == "--personal" ]]; then
+        pick_args+=(--personal)
+        shift
+    elif [[ "$1" == "-m" ]]; then
+        if [[ $# -lt 2 ]]; then
+            echo "Error: -m requires an argument" >&2
+            exit 1
+        fi
+        pick_args+=("$2")
         shift 2
     elif [[ "$1" == "--" ]]; then
         shift
@@ -34,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#issues[@]} -eq 0 ]]; then
-    echo "Usage: agent-from-issues [-R owner/repo] <issue-number-or-url>... [-- <agent> [<arg>...]]" >&2
+    echo "Usage: agent-from-issues [-R owner/repo] [--personal] [-m MODEL] <issue-number-or-url>... [-- <agent> [<arg>...]]" >&2
     exit 1
 fi
 
@@ -64,6 +76,12 @@ for item in "${issues[@]}"; do
     fi
     urls+=("$url")
 done
+
+if [[ ${#agent[@]} -eq 0 ]]; then
+    pick="$(agent-pick ${pick_args[@]+"${pick_args[@]}"})"
+    while IFS= read -r kv; do export "$kv"; done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<<"$pick")
+    agent=("$(jq -r .cli <<<"$pick")" --model "$(jq -r .model <<<"$pick")")
+fi
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT

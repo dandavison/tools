@@ -1,0 +1,97 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Choose a model from ~/.config/agent-models.toml (fzf, or by name) and print it as JSON.
+
+Output: {"name", "cli", "model", "env"}, where env holds the account's variables if --personal.
+Models with a `health` URL are offered only if that URL responds.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tomllib
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+CONFIG_PATH = Path(
+    os.environ.get("AGENT_MODELS", "~/.config/agent-models.toml")
+).expanduser()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("name", nargs="?")
+    parser.add_argument("--personal", action="store_true")
+    parser.add_argument("--list", action="store_true", help="print available models")
+    args = parser.parse_args()
+
+    config = tomllib.loads(CONFIG_PATH.read_text())
+    models = [m for m in config["models"] if is_available(m)]
+    if args.list:
+        print(format_rows(models), end="")
+        return
+    model = find(models, args.name or fzf(models, args.personal))
+    env = config["accounts"]["personal"] if args.personal else {}
+    print(
+        json.dumps(
+            {
+                "name": model["name"],
+                "cli": model["cli"],
+                "model": model["model"],
+                "env": {k: str(Path(v).expanduser()) for k, v in env.items()},
+            }
+        )
+    )
+
+
+def is_available(model: dict[str, Any]) -> bool:
+    if "health" not in model:
+        return True
+    try:
+        urllib.request.urlopen(model["health"], timeout=0.5)
+        return True
+    except OSError:
+        return False
+
+
+def format_rows(models: list[dict[str, Any]]) -> str:
+    width = max((len(m["name"]) for m in models), default=0)
+    return "".join(
+        f"{m['name']:<{width}}  {m['cli']:<6}  {m['model']}\n" for m in models
+    )
+
+
+def fzf(models: list[dict[str, Any]], personal: bool) -> str:
+    result = subprocess.run(
+        [
+            "fzf",
+            "--height=~40%",
+            "--reverse",
+            f"--header=account: {'personal' if personal else 'default'}",
+        ],
+        input=format_rows(models),
+        check=False,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return result.stdout.split()[0]
+
+
+def find(models: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    for model in models:
+        if model["name"] == name:
+            return model
+    sys.exit(f"agent-pick: model not available: {name}")
+
+
+if __name__ == "__main__":
+    main()
