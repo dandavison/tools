@@ -14,7 +14,7 @@ main() {
     prompt="$(rlwrap cat)"
     case "$cli" in
         claude) claude_oneshot "$model" "$prompt" ;;
-        codex) codex exec --model "$model" --skip-git-repo-check --ephemeral "$prompt" ;;
+        codex) codex_oneshot "$model" "$prompt" ;;
         pi) pi --model "$model" --print --no-session "$prompt" ;;
     esac
 }
@@ -50,6 +50,24 @@ claude_oneshot() {
             );
             .out
           )
+        '
+    rc=${PIPESTATUS[0]}
+    set -e
+    return "$rc"
+}
+
+# Codex logs to stderr; its errors also appear as events in the JSON stream.
+codex_oneshot() {
+    local model=$1 prompt=$2 rc
+    set +e
+    codex exec --model "$model" --skip-git-repo-check --ephemeral --json "$prompt" 2>/dev/null </dev/null |
+        jq -rj --unbuffered '
+            if .type == "item.completed" and .item.type == "agent_message" then "\(.item.text)\n"
+            elif .type == "item.completed" and .item.type == "error" then "\u001b[2m[error: \(.item.message)]\u001b[0m\n"
+            elif .type == "item.started" then "\u001b[2m[tool: \(.item.type)]\u001b[0m\n"
+            elif .type == "turn.failed" then "\u001b[2m--- failed: \(.error.message) ---\u001b[0m\n"
+            elif .type == "turn.completed" then "\n\u001b[2m--- done: \(.usage.input_tokens + .usage.output_tokens) tokens ---\u001b[0m\n"
+            else empty end
         '
     rc=${PIPESTATUS[0]}
     set -e
