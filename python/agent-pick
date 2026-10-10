@@ -6,7 +6,8 @@
 # ///
 """Choose a model from ~/.config/agent-models.toml (fzf, or by name) and print it as JSON.
 
-Output: {"name", "cli", "model", "env"}, where env holds the account's variables if --personal.
+Output: {"name", "cli", "model", "env", "price"}, where env holds the account's variables if
+--personal, and price is the model's USD per million tokens, or null.
 Models with a `health` URL are offered only if that URL responds.
 """
 
@@ -46,6 +47,7 @@ def main() -> None:
                 "cli": model["cli"],
                 "model": model["model"],
                 "env": {k: str(Path(v).expanduser()) for k, v in env.items()},
+                "price": model.get("price"),
             }
         )
     )
