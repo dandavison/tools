@@ -31,7 +31,7 @@ model = "claude-opus-5-5"
 name = "luna"
 cli = "codex"
 model = "gpt-6-luna"
-price = { input = 0.10, cached_input = 0.01, cache_write = 0.125, output = 0.50 }
+openrouter = "openai/gpt-6-luna"
 
 [[models]]
 name = "qwen-local"
@@ -41,10 +41,26 @@ health = "http://127.0.0.1:1/v1/models"
 """
 
 
+OPENROUTER_MODELS = {
+    "data": [
+        {
+            "id": "openai/gpt-6-luna",
+            "pricing": {
+                "prompt": "0.0000001",
+                "completion": "0.0000005",
+                "input_cache_read": "0.00000001",
+                "input_cache_write": "0.000000125",
+            },
+        }
+    ]
+}
+
+
 @pytest.fixture
 def config(tmp_path: Path) -> Path:
     path = tmp_path / "agent-models.toml"
     path.write_text(CONFIG)
+    (tmp_path / "openrouter-models.json").write_text(json.dumps(OPENROUTER_MODELS))
     return path
 
 
@@ -54,7 +70,11 @@ def run(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
         text=True,
-        env={**os.environ, "AGENT_MODELS": str(config)},
+        env={
+            **os.environ,
+            "AGENT_MODELS": str(config),
+            "AGENT_PRICES": str(config.parent / "openrouter-models.json"),
+        },
     )
 
 
@@ -75,7 +95,7 @@ def test_pick_by_name(config: Path) -> None:
     }
 
 
-def test_price_is_null_when_absent(config: Path) -> None:
+def test_price_is_null_without_openrouter_id(config: Path) -> None:
     result = run(config, "opus")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["price"] is None
@@ -106,3 +126,10 @@ def test_unknown_name_fails(config: Path) -> None:
     result = run(config, "nope")
     assert result.returncode != 0
     assert "nope" in result.stderr
+
+
+def test_missing_price_cache_fails(config: Path) -> None:
+    (config.parent / "openrouter-models.json").unlink()
+    result = run(config, "luna")
+    assert result.returncode != 0
+    assert "agent-prices-refresh" in result.stderr
