@@ -31,6 +31,7 @@ model = "claude-opus-5-5"
 name = "luna"
 cli = "codex"
 model = "gpt-6-luna"
+price = { input = 0.10, cached_input = 0.01, cache_write = 0.125, output = 0.50 }
 
 [[models]]
 name = "qwen-local"
@@ -65,7 +66,19 @@ def test_pick_by_name(config: Path) -> None:
         "cli": "codex",
         "model": "gpt-6-luna",
         "env": {},
+        "price": {
+            "input": 0.10,
+            "cached_input": 0.01,
+            "cache_write": 0.125,
+            "output": 0.50,
+        },
     }
+
+
+def test_price_is_null_when_absent(config: Path) -> None:
+    result = run(config, "opus")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["price"] is None
 
 
 def test_personal_sets_account_env(config: Path) -> None:
