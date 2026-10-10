@@ -1,0 +1,189 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Run a prompt non-interactively on a model chosen by agent-pick.
+
+    agent-run [--personal] [-m MODEL]                  prompt from stdin, or typed at the terminal
+    agent-run [--personal] [-m MODEL] FILE [ARG...]    prompt script; ARGs and stdin are appended
+
+A prompt script starts with e.g. `#!/usr/bin/env -S agent-run -m luna`. The model is
+$AGENT_MODEL if set, else -m MODEL, else chosen with fzf if there is a terminal.
+The answer goes to stdout; tool calls and cost go to stderr.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import IO, Any
+
+DIM, RESET = ("\x1b[2m", "\x1b[0m") if sys.stderr.isatty() else ("", "")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--personal", action="store_true")
+    parser.add_argument("-m", dest="model")
+    parser.add_argument("file", nargs="?", type=Path)
+    parser.add_argument("args", nargs="*")
+    args = parser.parse_args()
+
+    pick = pick_model(os.environ.get("AGENT_MODEL") or args.model, args.personal)
+    os.environ.update(pick["env"])
+    prompt = script_prompt(args.file, args.args) if args.file else terminal_prompt()
+    run = {"claude": run_claude, "codex": run_codex, "pi": run_pi}[pick["cli"]]
+    sys.exit(run(pick, prompt))
+
+
+def pick_model(name: str | None, personal: bool) -> dict[str, Any]:
+    if not name and not sys.stderr.isatty():
+        sys.exit("agent-run: no model: set AGENT_MODEL or pass -m")
+    result = subprocess.run(
+        [
+            "agent-pick",
+            *(["--personal"] if personal else []),
+            *([name] if name else []),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return json.loads(result.stdout)
+
+
+def script_prompt(file: Path, args: list[str]) -> str:
+    lines = file.read_text().splitlines(keepends=True)
+    prompt = "".join(lines[1:] if lines and lines[0].startswith("#!") else lines)
+    if args:
+        prompt += f"\n\nArguments: {' '.join(args)}"
+    if not sys.stdin.isatty():
+        prompt += f"\n\nInput:\n{sys.stdin.read()}"
+    return prompt
+
+
+def terminal_prompt() -> str:
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return subprocess.run(
+        ["rlwrap", "cat"], stdout=subprocess.PIPE, text=True, check=True
+    ).stdout
+
+
+def run_claude(pick: dict[str, Any], prompt: str) -> int:
+    cmd = ["claude", "--model", pick["model"], "--print", "--no-session-persistence"]
+    cmd += ["--output-format", "stream-json", "--verbose", prompt]
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True) as proc:
+        progress = Progress()
+        for event in events(proc.stdout):
+            if event["type"] == "assistant":
+                for block in event["message"].get("content", []):
+                    if block["type"] == "text":
+                        progress.answer(block["text"])
+                    elif block["type"] == "tool_use":
+                        name = block["name"]
+                        if name == "Skill":
+                            name = f"Skill({block['input'].get('skill')})"
+                        progress.tool(name)
+            elif event["type"] == "result":
+                cost = event.get("total_cost_usd") or 0
+                progress.done(
+                    f"{event['subtype']}, {event['num_turns']} turns, ${cost:.4g}"
+                )
+    return proc.returncode
+
+
+def run_codex(pick: dict[str, Any], prompt: str) -> int:
+    cmd = ["codex", "exec", "--model", pick["model"], "--skip-git-repo-check"]
+    cmd += ["--ephemeral", "--json", prompt]
+    # Codex logs to stderr; its errors also appear as events in the JSON stream.
+    with subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ) as proc:
+        progress = Progress()
+        for event in events(proc.stdout):
+            item = event.get("item", {})
+            if event["type"] == "item.started":
+                progress.tool(item["type"])
+            elif event["type"] == "item.completed" and item["type"] == "agent_message":
+                progress.answer(item["text"])
+            elif event["type"] == "item.completed" and item["type"] == "error":
+                progress.note(f"[error: {item['message']}]")
+            elif event["type"] == "turn.failed":
+                progress.done(f"failed: {event['error']['message']}")
+            elif event["type"] == "turn.completed":
+                progress.done(codex_usage(event["usage"], pick["price"]))
+    return proc.returncode
+
+
+def run_pi(pick: dict[str, Any], prompt: str) -> int:
+    cmd = ["pi", "--model", pick["model"], "--print", "--no-session", prompt]
+    return subprocess.run(cmd, check=False).returncode
+
+
+def events(stdout: IO[str] | None) -> Any:
+    assert stdout is not None
+    for line in stdout:
+        yield json.loads(line)
+
+
+def codex_usage(usage: dict[str, int], price: dict[str, float] | None) -> str:
+    if price is None:
+        return f"{usage['input_tokens'] + usage['output_tokens']} tokens"
+    cached, written = usage["cached_input_tokens"], usage["cache_write_input_tokens"]
+    cost = (
+        (usage["input_tokens"] - cached - written) * price["input"]
+        + cached * price["cached_input"]
+        + written * price["cache_write"]
+        + usage["output_tokens"] * price["output"]
+    ) / 1e6
+    return f"${cost:.4g}"
+
+
+class Progress:
+    """Answer text to stdout; tool calls and status to stderr, repeated tool calls as dots."""
+
+    def __init__(self) -> None:
+        self.last_tool: str | None = None
+
+    def answer(self, text: str) -> None:
+        self._end_dots()
+        print(text, flush=True)
+
+    def tool(self, name: str) -> None:
+        if name == self.last_tool:
+            sys.stderr.write(f"{DIM}·{RESET}")
+            sys.stderr.flush()
+            return
+        self._end_dots()
+        self.last_tool = name
+        sys.stderr.write(f"{DIM}[tool: {name}]{RESET}")
+        sys.stderr.flush()
+
+    def note(self, text: str) -> None:
+        self._end_dots()
+        print(f"{DIM}{text}{RESET}", file=sys.stderr, flush=True)
+
+    def done(self, summary: str) -> None:
+        self.note(f"--- done: {summary} ---")
+
+    def _end_dots(self) -> None:
+        if self.last_tool is not None:
+            sys.stderr.write("\n")
+            self.last_tool = None
+
+
+if __name__ == "__main__":
+    main()
