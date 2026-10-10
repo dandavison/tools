@@ -173,3 +173,17 @@ def test_personal_sets_account_env(home: Path) -> None:
     result = run(home, "--personal", "-m", "opus", stdin="hello")
     assert result.returncode == 0, result.stderr
     assert (home / "bin" / "claude.env").read_text().strip() == "/tmp/claude-personal"
+
+
+def test_no_tools_claude(home: Path) -> None:
+    result = run(home, "--no-tools", "-m", "opus", stdin="hello")
+    assert result.returncode == 0, result.stderr
+    argv = (home / "bin" / "claude.argv").read_text().splitlines()
+    assert argv[argv.index("--tools") + 1] == ""
+
+
+def test_no_tools_codex_is_read_only(home: Path) -> None:
+    result = run(home, "--no-tools", "-m", "luna", stdin="hello")
+    assert result.returncode == 0, result.stderr
+    argv = (home / "bin" / "codex.argv").read_text().splitlines()
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
