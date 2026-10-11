@@ -1,0 +1,80 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Render d2 source on stdin to SVG or PNG on stdout, with the house settings.
+
+  d2-render < diagram.d2 > diagram.svg     # SVG that follows prefers-color-scheme
+  d2-render --png < diagram.d2 > diagram.png  # light theme only
+
+Errors go to stderr with a nonzero exit.
+"""
+
+import argparse
+import secrets
+import subprocess
+import sys
+import tempfile
+
+LAYOUT = "tala"
+DARK_THEME = 200  # Dark Mauve
+FLAGS = ["--pad=20", "--scale=1", "--timeout=20"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--png", action="store_true", help="render PNG instead of SVG")
+    args = ap.parse_args()
+    if args.png:
+        result = render_png(sys.stdin.read())
+    else:
+        result = render_svg(sys.stdin.read())
+    if result.returncode != 0:
+        sys.stderr.buffer.write(result.stderr)
+        return result.returncode
+    sys.stdout.buffer.write(result.stdout)
+    return 0
+
+
+def render_svg(source: str) -> subprocess.CompletedProcess[bytes]:
+    # The SVG switches to the dark theme on prefers-color-scheme. A random salt keeps
+    # element IDs unique when several diagrams share one HTML page.
+    return run(
+        source,
+        [
+            f"--dark-theme={DARK_THEME}",
+            f"--salt={secrets.token_hex(4)}",
+            "--no-xml-tag",
+        ],
+        "svg",
+    )
+
+
+def render_png(source: str) -> subprocess.CompletedProcess[bytes]:
+    return run(source, [], "png")
+
+
+def run(source: str, flags: list[str], fmt: str) -> subprocess.CompletedProcess[bytes]:
+    # An empty cwd leaves relative @import in an untrusted diagram nothing to resolve.
+    with tempfile.TemporaryDirectory() as empty_cwd:
+        return subprocess.run(
+            [
+                "d2",
+                f"--layout={LAYOUT}",
+                *FLAGS,
+                *flags,
+                f"--stdout-format={fmt}",
+                "-",
+                "-",
+            ],
+            input=source.encode(),
+            capture_output=True,
+            cwd=empty_cwd,
+            check=False,
+        )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
