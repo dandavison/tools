@@ -95,10 +95,10 @@ def main() -> int:
     if not markdown.strip():
         die("no markdown on stdin")
     title, body = title_and_body(markdown, args.title)
-    body = unwrap_paragraphs(body)
     markers = Markers(f"NOTIONPUSH{uuid.uuid4().hex[:8]}")
     body = markers.mark_details(body)
     body = markers.mark_media(body, Path(args.base_dir), args.render_d2)
+    body = unwrap_paragraphs(body)
 
     token = notion_cookies(args.profile)["token_v2"]
     parent_id = extract_block_id(args.parent)
@@ -170,7 +170,7 @@ class Markers:
         if path.suffix.lower() not in MEDIA_TYPES or not path.is_file():
             return original
         self.media.append(path)
-        return f"\n{self.media_prefix}{len(self.media) - 1}\n"
+        return f"\n\n{self.media_prefix}{len(self.media) - 1}\n\n"
 
 
 def title_and_body(markdown: str, override: str | None) -> tuple[str, str]:
@@ -448,8 +448,8 @@ def poll_import(task_id: str, page_id: str, token: str, timeout_s: int) -> None:
 def rewrite_marked_blocks(
     page_id: str, space_id: str, markers: Markers, token: str
 ) -> None:
-    child_ids = load_block(page_id, token).get("content") or []
-    blocks = {b: load_block(b, token) for b in child_ids}
+    child_ids = load_blocks([page_id], token)[page_id].get("content") or []
+    blocks = load_blocks(child_ids, token)
     ops: list[dict[str, Any]] = []
     toggles: list[str] = []  # open toggle heads, innermost last
     expect_head = False
@@ -482,16 +482,27 @@ def rewrite_marked_blocks(
         save(ops[i : i + 200], space_id, token)
 
 
-def load_block(block_id: str, token: str) -> dict[str, Any]:
-    resp = api_post(
-        "syncRecordValues",
-        {"requests": [{"pointer": {"table": "block", "id": block_id}, "version": -1}]},
-        token,
-    )
-    block = unwrap(((resp.get("recordMap") or {}).get("block") or {}).get(block_id))
-    if not block:
-        die(f"block not found: {block_id}")
-    return block
+def load_blocks(block_ids: list[str], token: str) -> dict[str, dict[str, Any]]:
+    blocks: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(block_ids), 100):
+        batch = block_ids[i : i + 100]
+        resp = api_post(
+            "syncRecordValues",
+            {
+                "requests": [
+                    {"pointer": {"table": "block", "id": b}, "version": -1}
+                    for b in batch
+                ]
+            },
+            token,
+        )
+        records = (resp.get("recordMap") or {}).get("block") or {}
+        for b in batch:
+            block = unwrap(records.get(b))
+            if not block:
+                die(f"block not found: {b}")
+            blocks[b] = block
+    return blocks
 
 
 def block_text(block: dict[str, Any]) -> str:
@@ -640,14 +651,22 @@ def api_post(path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
         headers={"Content-Type": "application/json", "Cookie": f"token_v2={token}"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        die(
-            f"POST {path} -> {e.code} {e.reason}: {e.read().decode(errors='replace')[:500]}"
-        )
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 5:
+                log(f"rate limited on {path}; retrying")
+                time.sleep(2**attempt * 5)
+                continue
+            error = e
+            break
+    die(
+        f"POST {path} -> {error.code} {error.reason}: "
+        f"{error.read().decode(errors='replace')[:500]}"
+    )
 
 
 def local_timezone() -> str:
