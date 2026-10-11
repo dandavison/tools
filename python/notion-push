@@ -45,6 +45,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -98,7 +99,27 @@ def main() -> int:
         metavar="TEXT",
         help="attach a comment to the page's last block",
     )
+    ap.add_argument(
+        "--replace-media",
+        nargs="+",
+        metavar="FILE",
+        help="with --page, and no markdown on stdin: replace the page's image and video "
+        "blocks whose file has the same name as FILE, keeping their comments",
+    )
     args = ap.parse_args()
+    if args.replace_media:
+        if not args.page:
+            die("--replace-media needs --page")
+        token = notion_cookies(args.profile)["token_v2"]
+        page_id = extract_block_id(args.page)
+        replace_media(
+            page_id,
+            space_of(page_id, token),
+            list(map(Path, args.replace_media)),
+            token,
+        )
+        print(page_url(page_id))
+        return 0
 
     markdown = sys.stdin.read()
     if not markdown.strip():
@@ -696,6 +717,74 @@ def media_ops(
             "args": {"id": block_id, **({"after": after} if after else {})},
         },
     ]
+
+
+def replace_media(page_id: str, space_id: str, paths: list[Path], token: str) -> None:
+    """Notion rejects edits to a media block's file, so each matching block is replaced by a new
+    one in the same place, and the old block's comment threads move to the new block."""
+    by_name = {p.name: p for p in paths}
+    replaced: set[str] = set()
+    for block, parent_id in walk(page_id, token):
+        name = media_name(block)
+        if name not in by_name:
+            continue
+        ops = media_ops(by_name[name], page_id, parent_id, block["id"], space_id, token)
+        new_id = ops[0]["args"]["id"]
+        ops += move_discussions_ops(block, new_id, space_id)
+        pointer = {"table": "block", "id": block["id"], "spaceId": space_id}
+        ops += remove_ops(pointer, parent_id, space_id)
+        save(ops, space_id, token)
+        log(f"replaced {name} (block {block['id']} -> {new_id})")
+        replaced.add(name)
+    if missing := sorted(set(by_name) - replaced):
+        die(f"no image or video block on the page for: {', '.join(missing)}")
+
+
+def walk(page_id: str, token: str) -> Iterator[tuple[dict[str, Any], str]]:
+    """Yield every block under the page, with its parent's ID, without entering subpages."""
+    parents = [page_id]
+    while parents:
+        content = load_blocks(parents, token)
+        parents = []
+        for parent_id, parent in content.items():
+            children = load_blocks(parent.get("content") or [], token)
+            for child in children.values():
+                yield child, parent_id
+                if child.get("type") != "page" and child.get("content"):
+                    parents.append(child["id"])
+
+
+def media_name(block: dict[str, Any]) -> str | None:
+    if block.get("type") not in ("image", "video"):
+        return None
+    source = ((block.get("properties") or {}).get("source") or [[""]])[0][0]
+    return re.split(r"[:/]", source)[-1] or None
+
+
+def move_discussions_ops(
+    block: dict[str, Any], new_id: str, space_id: str
+) -> list[dict[str, Any]]:
+    ops: list[dict[str, Any]] = []
+    for discussion_id in block.get("discussions") or []:
+        ops += [
+            {
+                "pointer": {
+                    "table": "discussion",
+                    "id": discussion_id,
+                    "spaceId": space_id,
+                },
+                "path": [],
+                "command": "update",
+                "args": {"parent_id": new_id, "parent_table": "block"},
+            },
+            {
+                "pointer": {"table": "block", "id": new_id, "spaceId": space_id},
+                "path": ["discussions"],
+                "command": "listAfter",
+                "args": {"id": discussion_id},
+            },
+        ]
+    return ops
 
 
 def put_headers(upload: dict[str, Any]) -> dict[str, str]:
