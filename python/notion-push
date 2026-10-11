@@ -13,7 +13,7 @@ Markdown-to-blocks conversion. This is the same conversion as the "Import >
 Markdown" menu item, and the inverse of notion-fetch.
 
 Usage:
-  gh-issue-to-md 42 | notion-push [--parent <notion-url>] [--title TITLE]
+  gh-issue-to-md 42 | notion-push [--parent <notion-url> | --page <notion-url>] [--title TITLE]
 
 Prints the new page's URL. The title comes from --title, else the YAML
 frontmatter `title`, else the first H1; frontmatter is dropped, as is a leading
@@ -75,6 +75,10 @@ def main() -> int:
     )
     ap.add_argument("--parent", default=DEFAULT_PARENT, help="parent Notion page URL")
     ap.add_argument(
+        "--page",
+        help="existing Notion page URL whose content to replace (keeps its URL)",
+    )
+    ap.add_argument(
         "--title", help="page title (default: from frontmatter or first H1)"
     )
     ap.add_argument(
@@ -101,10 +105,15 @@ def main() -> int:
     body = unwrap_paragraphs(body)
 
     token = notion_cookies(args.profile)["token_v2"]
-    parent_id = extract_block_id(args.parent)
-    space_id = space_of(parent_id, token)
-    page_id = create_empty_subpage(parent_id, space_id, token)
-    log(f"created page {page_id} under {parent_id}")
+    if args.page:
+        page_id = extract_block_id(args.page)
+        space_id = space_of(page_id, token)
+        log(f"replacing content of page {page_id}")
+    else:
+        parent_id = extract_block_id(args.parent)
+        space_id = space_of(parent_id, token)
+        page_id = create_empty_subpage(parent_id, space_id, token)
+        log(f"created page {page_id} under {parent_id}")
     import_markdown(page_id, space_id, title, body.encode(), token, args.timeout)
     rewrite_marked_blocks(page_id, space_id, markers, token)
     print(page_url(page_id))
