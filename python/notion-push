@@ -19,6 +19,17 @@ Prints the new page's URL. The title comes from --title, else the YAML
 frontmatter `title`, else the first H1; frontmatter is dropped, as is a leading
 H1 that supplied the title (Notion titles the page from the uploaded filename).
 
+Notion's importer handles neither HTML nor local files, so before importing,
+notion-push replaces these with marker paragraphs, and afterwards rewrites the
+marked blocks:
+- `<details><summary><h3>T</h3></summary> ... </details>` becomes a toggle
+  heading (a plain `<summary>T</summary>` becomes a toggle).
+- A line that is only `![alt](path)` or `[alt](path)`, where path is a local
+  image or video file (relative to --base-dir), becomes an uploaded image or
+  video block.
+- With --render-d2, a ```d2 fenced block becomes an uploaded PNG rendered by
+  d2-render.
+
 Requires being logged into Notion in Chrome. The first run triggers a one-time
 macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
 """
@@ -27,7 +38,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +49,18 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from pycookiecheat import chrome_cookies
+
+D2_RENDER = Path(__file__).resolve().with_name("d2-render")
+MEDIA_TYPES = {
+    ".png": ("image", "image/png"),
+    ".jpg": ("image", "image/jpeg"),
+    ".jpeg": ("image", "image/jpeg"),
+    ".gif": ("image", "image/gif"),
+    ".svg": ("image", "image/svg+xml"),
+    ".mp4": ("video", "video/mp4"),
+    ".webm": ("video", "video/webm"),
+    ".mov": ("video", "video/quicktime"),
+}
 
 API = "https://www.notion.so/api/v3"
 DEFAULT_PARENT = "https://www.notion.so/3c78fc567738803cb9d0f10ffeadfdbd"
@@ -56,6 +81,14 @@ def main() -> int:
         "--profile", help='Chrome profile, e.g. "Profile 1" (default: Default)'
     )
     ap.add_argument("--timeout", type=int, default=180, help="import wait, seconds")
+    ap.add_argument(
+        "--base-dir",
+        default=".",
+        help="directory that local media paths are relative to",
+    )
+    ap.add_argument(
+        "--render-d2", action="store_true", help="upload d2 blocks as rendered PNGs"
+    )
     args = ap.parse_args()
 
     markdown = sys.stdin.read()
@@ -63,6 +96,9 @@ def main() -> int:
         die("no markdown on stdin")
     title, body = title_and_body(markdown, args.title)
     body = unwrap_paragraphs(body)
+    markers = Markers(f"NOTIONPUSH{uuid.uuid4().hex[:8]}")
+    body = markers.mark_details(body)
+    body = markers.mark_media(body, Path(args.base_dir), args.render_d2)
 
     token = notion_cookies(args.profile)["token_v2"]
     parent_id = extract_block_id(args.parent)
@@ -70,8 +106,71 @@ def main() -> int:
     page_id = create_empty_subpage(parent_id, space_id, token)
     log(f"created page {page_id} under {parent_id}")
     import_markdown(page_id, space_id, title, body.encode(), token, args.timeout)
+    rewrite_marked_blocks(page_id, space_id, markers, token)
     print(page_url(page_id))
     return 0
+
+
+class Markers:
+    """Marker paragraphs standing in for what the importer cannot handle."""
+
+    def __init__(self, nonce: str) -> None:
+        self.open = f"{nonce}OPEN"
+        self.close = f"{nonce}CLOSE"
+        self.media_prefix = f"{nonce}MEDIA"
+        self.media: list[Path] = []
+        self.rendered_dir = Path(tempfile.mkdtemp(prefix="notion-push-"))
+
+    def mark_details(self, md: str) -> str:
+        def open_toggle(m: re.Match[str]) -> str:
+            heading = re.fullmatch(
+                r"\s*<h([1-6])>(.*?)</h\1>\s*", m.group(1), re.DOTALL
+            )
+            if heading:
+                level = min(int(heading.group(1)), 3)
+                head = f"{'#' * level} {heading.group(2).strip()}"
+            else:
+                head = m.group(1).strip()
+            return f"\n\n{self.open}\n\n{head}\n\n"
+
+        md = re.sub(
+            r"<details>\s*<summary>(.*?)</summary>", open_toggle, md, flags=re.DOTALL
+        )
+        return re.sub(r"</details>", f"\n\n{self.close}\n\n", md)
+
+    def mark_media(self, md: str, base_dir: Path, render_d2: bool) -> str:
+        if render_d2:
+            md = re.sub(
+                r"^```d2\n(.*?)^```[ \t]*$",
+                self.render_d2_block,
+                md,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+        return re.sub(
+            r"^!?\[[^\]]*\]\(([^)\s]+)\)[ \t]*$",
+            lambda m: self.media_marker(base_dir / m.group(1), m.group(0)),
+            md,
+            flags=re.MULTILINE,
+        )
+
+    def render_d2_block(self, m: re.Match[str]) -> str:
+        png = self.rendered_dir / f"diagram-{len(self.media) + 1}.png"
+        result = subprocess.run(
+            [D2_RENDER, "--png"],
+            input=m.group(1).encode(),
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            die(f"d2-render failed: {result.stderr.decode(errors='replace')}")
+        png.write_bytes(result.stdout)
+        return self.media_marker(png, m.group(0))
+
+    def media_marker(self, path: Path, original: str) -> str:
+        if path.suffix.lower() not in MEDIA_TYPES or not path.is_file():
+            return original
+        self.media.append(path)
+        return f"\n{self.media_prefix}{len(self.media) - 1}\n"
 
 
 def title_and_body(markdown: str, override: str | None) -> tuple[str, str]:
@@ -280,7 +379,7 @@ def import_markdown(
         },
         token,
     )
-    put(upload["signedPutUrl"], data, upload.get("putHeaders") or {})
+    put(upload["signedPutUrl"], data, put_headers(upload), "text/markdown")
     task_id = api_post(
         "enqueueTask",
         {
@@ -312,11 +411,11 @@ def file_stem(title: str) -> str:
     return re.sub(r"[\\/\s]+", " ", title).strip() or "Untitled"
 
 
-def put(url: str, data: bytes, headers: dict[str, str]) -> None:
+def put(url: str, data: bytes, headers: dict[str, str], content_type: str) -> None:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "text/markdown", **headers},
+        headers={"Content-Type": content_type, **headers},
         method="PUT",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -344,6 +443,190 @@ def poll_import(task_id: str, page_id: str, token: str, timeout_s: int) -> None:
         log(f"  state={state}")
         time.sleep(2)
     die(f"import timed out after {timeout_s}s")
+
+
+def rewrite_marked_blocks(
+    page_id: str, space_id: str, markers: Markers, token: str
+) -> None:
+    child_ids = load_block(page_id, token).get("content") or []
+    blocks = {b: load_block(b, token) for b in child_ids}
+    ops: list[dict[str, Any]] = []
+    toggles: list[str] = []  # open toggle heads, innermost last
+    expect_head = False
+    for block_id in child_ids:
+        text = block_text(blocks[block_id])
+        pointer = {"table": "block", "id": block_id, "spaceId": space_id}
+        if text in (markers.open, markers.close):
+            if text == markers.open:
+                expect_head = True
+            elif toggles:
+                toggles.pop()
+            ops += remove_ops(pointer, page_id, space_id)
+            continue
+        if text.startswith(markers.media_prefix):
+            # Notion rejects edits to an imported block's properties, so the media
+            # block is a new one, placed where the marker was.
+            path = markers.media[int(text.removeprefix(markers.media_prefix))]
+            parent = toggles[-1] if toggles else page_id
+            after = block_id if parent == page_id else None
+            ops += media_ops(path, page_id, parent, after, space_id, token)
+            ops += remove_ops(pointer, page_id, space_id)
+            continue
+        if toggles:
+            ops += move_ops(pointer, page_id, toggles[-1], space_id)
+        if expect_head:
+            ops.append(make_toggle(pointer, blocks[block_id]))
+            toggles.append(block_id)
+            expect_head = False
+    for i in range(0, len(ops), 200):
+        save(ops[i : i + 200], space_id, token)
+
+
+def load_block(block_id: str, token: str) -> dict[str, Any]:
+    resp = api_post(
+        "syncRecordValues",
+        {"requests": [{"pointer": {"table": "block", "id": block_id}, "version": -1}]},
+        token,
+    )
+    block = unwrap(((resp.get("recordMap") or {}).get("block") or {}).get(block_id))
+    if not block:
+        die(f"block not found: {block_id}")
+    return block
+
+
+def block_text(block: dict[str, Any]) -> str:
+    title = (block.get("properties") or {}).get("title") or []
+    return "".join(chunk[0] for chunk in title if chunk).strip()
+
+
+def remove_ops(
+    pointer: dict[str, str], parent_id: str, space_id: str
+) -> list[dict[str, Any]]:
+    return [
+        {"pointer": pointer, "path": [], "command": "update", "args": {"alive": False}},
+        {
+            "pointer": {"table": "block", "id": parent_id, "spaceId": space_id},
+            "path": ["content"],
+            "command": "listRemove",
+            "args": {"id": pointer["id"]},
+        },
+    ]
+
+
+def move_ops(
+    pointer: dict[str, str], old_parent: str, new_parent: str, space_id: str
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "pointer": {"table": "block", "id": old_parent, "spaceId": space_id},
+            "path": ["content"],
+            "command": "listRemove",
+            "args": {"id": pointer["id"]},
+        },
+        {
+            "pointer": pointer,
+            "path": [],
+            "command": "update",
+            "args": {"parent_id": new_parent, "parent_table": "block"},
+        },
+        {
+            "pointer": {"table": "block", "id": new_parent, "spaceId": space_id},
+            "path": ["content"],
+            "command": "listAfter",
+            "args": {"id": pointer["id"]},
+        },
+    ]
+
+
+def make_toggle(pointer: dict[str, str], block: dict[str, Any]) -> dict[str, Any]:
+    if block.get("type") in ("header", "sub_header", "sub_sub_header"):
+        return {
+            "pointer": pointer,
+            "path": ["format"],
+            "command": "update",
+            "args": {"toggleable": True},
+        }
+    return {
+        "pointer": pointer,
+        "path": [],
+        "command": "update",
+        "args": {"type": "toggle"},
+    }
+
+
+def media_ops(
+    path: Path,
+    page_id: str,
+    parent_id: str,
+    after: str | None,
+    space_id: str,
+    token: str,
+) -> list[dict[str, Any]]:
+    block_type, content_type = MEDIA_TYPES[path.suffix.lower()]
+    upload = api_post(
+        "getUploadFileUrl",
+        {
+            "bucket": "secure",
+            "name": path.name,
+            "contentType": content_type,
+            "record": {"table": "block", "id": page_id, "spaceId": space_id},
+        },
+        token,
+    )
+    put(upload["signedPutUrl"], path.read_bytes(), put_headers(upload), content_type)
+    log(f"uploaded {path.name}")
+    url = upload["url"]
+    block_id = str(uuid.uuid4())
+    return [
+        {
+            "pointer": {"table": "block", "id": block_id, "spaceId": space_id},
+            "path": [],
+            "command": "set",
+            "args": {
+                "type": block_type,
+                "id": block_id,
+                "version": 1,
+                "properties": {"source": [[url]]},
+                "format": {"display_source": url},
+                "file_ids": [file_id_of(url)],
+                "parent_id": parent_id,
+                "parent_table": "block",
+                "alive": True,
+                "space_id": space_id,
+            },
+        },
+        {
+            "pointer": {"table": "block", "id": parent_id, "spaceId": space_id},
+            "path": ["content"],
+            "command": "listAfter",
+            "args": {"id": block_id, **({"after": after} if after else {})},
+        },
+    ]
+
+
+def put_headers(upload: dict[str, Any]) -> dict[str, str]:
+    """putHeaders comes back as a list of {name, value}."""
+    return {h["name"]: h["value"] for h in upload.get("putHeaders") or []}
+
+
+def file_id_of(url: str) -> str:
+    ids = UUID_RE.findall(url)
+    if not ids:
+        die(f"no file id in upload URL: {url}")
+    return ids[-1]
+
+
+def save(ops: list[dict[str, Any]], space_id: str, token: str) -> None:
+    api_post(
+        "saveTransactions",
+        {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {"id": str(uuid.uuid4()), "spaceId": space_id, "operations": ops}
+            ],
+        },
+        token,
+    )
 
 
 def page_url(page_id: str) -> str:
