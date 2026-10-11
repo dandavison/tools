@@ -93,6 +93,11 @@ def main() -> int:
     ap.add_argument(
         "--render-d2", action="store_true", help="upload d2 blocks as rendered PNGs"
     )
+    ap.add_argument(
+        "--comment-last",
+        metavar="TEXT",
+        help="attach a comment to the page's last block",
+    )
     args = ap.parse_args()
 
     markdown = sys.stdin.read()
@@ -104,7 +109,8 @@ def main() -> int:
     body = markers.mark_media(body, Path(args.base_dir), args.render_d2)
     body = unwrap_paragraphs(body)
 
-    token = notion_cookies(args.profile)["token_v2"]
+    cookies = notion_cookies(args.profile)
+    token = cookies["token_v2"]
     if args.page:
         page_id = extract_block_id(args.page)
         space_id = space_of(page_id, token)
@@ -116,6 +122,10 @@ def main() -> int:
         log(f"created page {page_id} under {parent_id}")
     import_markdown(page_id, space_id, title, body.encode(), token, args.timeout)
     rewrite_marked_blocks(page_id, space_id, markers, token)
+    if args.comment_last:
+        comment_on_last_block(
+            page_id, space_id, args.comment_last, cookies["notion_user_id"], token
+        )
     print(page_url(page_id))
     return 0
 
@@ -489,6 +499,70 @@ def rewrite_marked_blocks(
             expect_head = False
     for i in range(0, len(ops), 200):
         save(ops[i : i + 200], space_id, token)
+
+
+def comment_on_last_block(
+    page_id: str, space_id: str, text: str, user_id: str, token: str
+) -> None:
+    content = load_blocks([page_id], token)[page_id].get("content") or []
+    if not content:
+        die("cannot comment: the page is empty")
+    block_id = content[-1]
+    discussion_id = str(uuid.uuid4())
+    comment_id = str(uuid.uuid4())
+    now = int(time.time() * 1000)
+    save(
+        [
+            {
+                "pointer": {
+                    "table": "discussion",
+                    "id": discussion_id,
+                    "spaceId": space_id,
+                },
+                "path": [],
+                "command": "set",
+                "args": {
+                    "id": discussion_id,
+                    "version": 1,
+                    "parent_id": block_id,
+                    "parent_table": "block",
+                    "resolved": False,
+                    "comments": [comment_id],
+                    "space_id": space_id,
+                    "type": "default",
+                    "nav_parent_table": "block",
+                    "nav_parent_id": page_id,
+                },
+            },
+            {
+                "pointer": {"table": "comment", "id": comment_id, "spaceId": space_id},
+                "path": [],
+                "command": "set",
+                "args": {
+                    "id": comment_id,
+                    "version": 1,
+                    "parent_id": discussion_id,
+                    "parent_table": "discussion",
+                    "text": [[text]],
+                    "created_by_id": user_id,
+                    "created_by_table": "notion_user",
+                    "created_time": now,
+                    "last_edited_time": now,
+                    "alive": True,
+                    "space_id": space_id,
+                },
+            },
+            {
+                "pointer": {"table": "block", "id": block_id, "spaceId": space_id},
+                "path": ["discussions"],
+                "command": "listAfter",
+                "args": {"id": discussion_id},
+            },
+        ],
+        space_id,
+        token,
+    )
+    log(f"commented on block {block_id}")
 
 
 def load_blocks(block_ids: list[str], token: str) -> dict[str, dict[str, Any]]:
