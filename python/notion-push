@@ -35,6 +35,7 @@ macOS Keychain prompt for "Chrome Safe Storage"; click "Always Allow".
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -728,16 +729,65 @@ def replace_media(page_id: str, space_id: str, paths: list[Path], token: str) ->
         name = media_name(block)
         if name not in by_name:
             continue
-        ops = media_ops(by_name[name], page_id, parent_id, block["id"], space_id, token)
-        new_id = ops[0]["args"]["id"]
-        ops += move_discussions_ops(block, new_id, space_id)
-        pointer = {"table": "block", "id": block["id"], "spaceId": space_id}
-        ops += remove_ops(pointer, parent_id, space_id)
-        save(ops, space_id, token)
+        new_id = replace_media_block(
+            block, parent_id, by_name[name], page_id, space_id, token
+        )
         log(f"replaced {name} (block {block['id']} -> {new_id})")
         replaced.add(name)
     if missing := sorted(set(by_name) - replaced):
         die(f"no image or video block on the page for: {', '.join(missing)}")
+
+
+def replace_media_block(
+    block: dict[str, Any],
+    parent_id: str,
+    path: Path,
+    page_id: str,
+    space_id: str,
+    token: str,
+) -> str:
+    """Replace one image or video block by a new one holding `path`, moving its comment
+    threads to the new block. Returns the new block's ID."""
+    ops = media_ops(path, page_id, parent_id, block["id"], space_id, token)
+    new_id = ops[0]["args"]["id"]
+    ops += move_discussions_ops(block, new_id, space_id)
+    pointer = {"table": "block", "id": block["id"], "spaceId": space_id}
+    ops += remove_ops(pointer, parent_id, space_id)
+    save(ops, space_id, token)
+    return new_id
+
+
+def file_sha256(block: dict[str, Any], space_id: str, cookies: dict[str, str]) -> str:
+    """SHA-256 of the file in an image or video block, as Notion stores it."""
+    source = ((block.get("properties") or {}).get("source") or [[""]])[0][0]
+    signed = api_post(
+        "getSignedFileUrls",
+        {
+            "urls": [
+                {
+                    "url": source,
+                    "permissionRecord": {
+                        "table": "block",
+                        "id": block["id"],
+                        "spaceId": space_id,
+                    },
+                }
+            ]
+        },
+        cookies["token_v2"],
+    )["signedUrls"][0]
+    req = urllib.request.Request(
+        signed,
+        headers={
+            "Cookie": f"token_v2={cookies['token_v2']}; "
+            f"file_token={cookies.get('file_token', '')}"
+        },
+    )
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        while chunk := resp.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def walk(page_id: str, token: str) -> Iterator[tuple[dict[str, Any], str]]:
