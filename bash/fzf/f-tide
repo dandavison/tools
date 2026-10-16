@@ -1,7 +1,7 @@
 #!/bin/bash
-# Pick any wormhole project, opening it if it has no tmux window yet, and go to
-# one of its tide views (files, search, git, home), as the tide key bindings do
-# from inside the project.
+# Pick any wormhole project, switch to it via wormhole (opening it if needed),
+# and go to one of its tide views (files, search, git, home), as the tide key
+# bindings do from inside the project.
 
 view="$1"
 
@@ -9,14 +9,11 @@ main() {
     local project window
     project="$(projects | fzf)"
     [ -n "$project" ] || exit
+    # Switch project via wormhole first so that the project's window, not the
+    # window the popup was opened from, is tmux's last window when the view
+    # window closes.
+    wormhole open "$project" --land-in terminal || exit
     window="$(project_window "$project")"
-    if [ -z "$window" ]; then
-        wormhole open "$project" --land-in terminal || exit
-        window="$(project_window "$project")"
-    fi
-    # Select the project's window first so that it, not the window the popup
-    # was opened from, is tmux's last window when the view window closes.
-    tmux select-window -t "$window"
     tmux run-shell -b -t "$window" \
         "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"
 }
