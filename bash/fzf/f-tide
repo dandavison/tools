@@ -11,10 +11,8 @@ main() {
     [ -n "$project" ] || exit
     # Switch project via wormhole first so that the project's window, not the
     # window the popup was opened from, is tmux's last window when the view
-    # window closes. Not `wormhole open`: it would resolve a project name that
-    # is also a relative path (e.g. `shell`) to that directory.
-    curl -fsS --max-time 30 \
-        "http://127.0.0.1:${WORMHOLE_PORT:-7117}/project/switch/$project?land-in=terminal&sync=true" >/dev/null || exit
+    # window closes.
+    wormhole open --project "$project" --land-in terminal || exit
     window="$(project_window "$project")"
     tmux run-shell -b -t "$window" \
         "$HOME/.local/bin/tide $view '#{window_name}' '#{@project}' '#{@view}' '#{pane_current_path}' '#{session_name}'"
