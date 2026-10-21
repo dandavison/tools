@@ -7,9 +7,9 @@
 """Export a Notion page to Markdown on stdout, with no LLM in the loop.
 
 Reads your Chrome `token_v2` session cookie (via pycookiecheat), drives Notion's
-private export API (enqueueTask/getTasks), downloads the resulting zip, and
-prints its Markdown. This is Notion's own high-fidelity export, identical to the
-"Export" menu item.
+private export API (enqueueExportBlock, then polling the task_output record),
+downloads the resulting zip, and prints its Markdown. This is Notion's own
+high-fidelity export, identical to the "Export" menu item.
 
 Usage:
   notion-fetch <notion-url> [--recursive] [--profile "Profile 1"]
@@ -63,9 +63,10 @@ def main() -> int:
     cookies = notion_cookies(args.profile)
     token = cookies["token_v2"]
 
-    task_id = enqueue_export(block_id, token, args.recursive)
-    log(f"export task {task_id} enqueued for block {block_id}")
-    export_url = poll_export(task_id, token, args.timeout)
+    space_id = block_space_id(block_id, token)
+    output_key = enqueue_export(block_id, space_id, token, args.recursive)
+    log(f"export {output_key} enqueued for block {block_id}")
+    export_url = poll_export(output_key, space_id, token, args.timeout)
     log(f"downloading {export_url}")
     sys.stdout.write(markdown_from_zip(download(export_url, cookies)))
     sys.stdout.write(comments_markdown(block_id, token))
@@ -99,49 +100,58 @@ def notion_cookies(profile: str | None) -> dict[str, str]:
     return cookies
 
 
-def enqueue_export(block_id: str, token: str, recursive: bool) -> str:
+def block_space_id(block_id: str, token: str) -> str:
     body = {
-        "task": {
-            "eventName": "exportBlock",
-            "request": {
-                "block": {"id": block_id},
-                "recursive": recursive,
-                "exportOptions": {
-                    "exportType": "markdown",
-                    "timeZone": local_timezone(),
-                    "locale": "en",
-                },
-            },
-        }
+        "requests": [{"pointer": {"table": "block", "id": block_id}, "version": -1}]
     }
-    return api_post("enqueueTask", body, token)["taskId"]
+    rec = api_post("syncRecordValues", body, token)["recordMap"]["block"][block_id]
+    if "spaceId" not in rec:
+        die(f"cannot access block {block_id}: {json.dumps(rec)}")
+    return rec["spaceId"]
 
 
-def poll_export(task_id: str, token: str, timeout_s: int) -> str:
+def enqueue_export(block_id: str, space_id: str, token: str, recursive: bool) -> str:
+    body = {
+        "block": {"id": block_id, "spaceId": space_id},
+        "recursive": recursive,
+        "exportOptions": {
+            "exportType": "markdown",
+            "timeZone": local_timezone(),
+            "locale": "en",
+            "includeContents": "everything",
+        },
+        "shouldExportComments": False,
+    }
+    return api_post("enqueueExportBlock", body, token)["outputKey"]
+
+
+def poll_export(output_key: str, space_id: str, token: str, timeout_s: int) -> str:
+    pointer = {"table": "task_output", "id": output_key, "spaceId": space_id}
+    body = {"requests": [{"pointer": pointer, "version": -1}]}
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        results = (
-            api_post("getTasks", {"taskIds": [task_id]}, token).get("results") or []
+        rec = api_post("syncRecordValues", body, token)["recordMap"]["task_output"]
+        output = rec.get(output_key, {}).get("value", {}).get("value") or {}
+        value = output.get("value") or {}
+        lifecycle = task_lifecycle(output)
+        if lifecycle == "success":
+            return value["exportURL"]
+        if lifecycle == "failure":
+            die(f"export failed: {json.dumps(output)}")
+        log(
+            f"  status={output.get('status')} pagesExported={value.get('pagesExported')}"
         )
-        if not results:
-            die(f"task {task_id} not found")
-        task = results[0]
-        # getTasks returns this placeholder for task ids it doesn't know.
-        if task.get("eventName") == "unknown":
-            die(
-                f"Notion has no record of export task {task_id}: enqueueTask "
-                "accepted the request but the task was never created. Notion's "
-                "private export API has probably changed."
-            )
-        state = task.get("state")
-        if state == "success":
-            return task["status"]["exportURL"]
-        if state == "failure":
-            die(f"export failed: {json.dumps(task.get('error') or task.get('status'))}")
-        status = task.get("status") or {}
-        log(f"  state={state} pagesExported={status.get('pagesExported')}")
         time.sleep(2)
     die(f"export timed out after {timeout_s}s")
+
+
+def task_lifecycle(output: dict[str, Any]) -> str:
+    """Notion's web app derives this from either field."""
+    if output.get("lifecycle") in ("success", "failure"):
+        return output["lifecycle"]
+    return {"complete": "success", "failed": "failure"}.get(
+        output.get("status", ""), "in_progress"
+    )
 
 
 def download(url: str, cookies: dict[str, str]) -> bytes:
