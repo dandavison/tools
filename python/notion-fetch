@@ -126,6 +126,13 @@ def poll_export(task_id: str, token: str, timeout_s: int) -> str:
         if not results:
             die(f"task {task_id} not found")
         task = results[0]
+        # getTasks returns this placeholder for task ids it doesn't know.
+        if task.get("eventName") == "unknown":
+            die(
+                f"Notion has no record of export task {task_id}: enqueueTask "
+                "accepted the request but the task was never created. Notion's "
+                "private export API has probably changed."
+            )
         state = task.get("state")
         if state == "success":
             return task["status"]["exportURL"]
