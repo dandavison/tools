@@ -119,20 +119,51 @@ def test_multi_block_table_cells_are_folded_into_one_row() -> None:
     ]
 
 
-def test_poll_export_fails_fast_when_notion_has_no_record_of_task(
+def task_output_response(key: str, output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recordMap": {
+            "task_output": {key: {"spaceId": "space", "value": {"value": output}}}
+        }
+    }
+
+
+def test_poll_export_returns_url_from_task_output_record() -> None:
+    notion_fetch = cast(Any, load_module())
+    outputs = iter(
+        [
+            {"version": 1, "status": "waiting"},
+            {
+                "version": 4,
+                "lifecycle": "success",
+                "value": {"pagesExported": 1, "exportURL": "https://export.zip"},
+            },
+        ]
+    )
+    pointers: list[dict[str, Any]] = []
+
+    def api_post(path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+        assert path == "syncRecordValues"
+        pointers.append(body["requests"][0]["pointer"])
+        return task_output_response("key", next(outputs))
+
+    notion_fetch.api_post = api_post
+    notion_fetch.time.sleep = lambda s: None
+
+    assert notion_fetch.poll_export("key", "space", "token", 60) == "https://export.zip"
+    assert pointers[0] == {"table": "task_output", "id": "key", "spaceId": "space"}
+
+
+def test_poll_export_dies_when_task_output_reports_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     notion_fetch = cast(Any, load_module())
-    unknown_task = {
-        "id": "task",
-        "state": "not_started",
-        "eventName": "unknown",
-        "request": {},
-    }
-    notion_fetch.api_post = lambda path, body, token: {"results": [unknown_task]}
-    notion_fetch.time.sleep = lambda s: pytest.fail("polled an unknown task")
+    failed = {"version": 2, "status": "failed", "value": {"error": "boom"}}
+    notion_fetch.api_post = lambda path, body, token: task_output_response(
+        "key", failed
+    )
+    notion_fetch.time.sleep = lambda s: pytest.fail("polled a failed export")
 
     with pytest.raises(SystemExit):
-        notion_fetch.poll_export("task", "token", 60)
+        notion_fetch.poll_export("key", "space", "token", 60)
 
-    assert "no record of export task" in capsys.readouterr().err
+    assert "boom" in capsys.readouterr().err
