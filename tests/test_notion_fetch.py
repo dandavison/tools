@@ -16,6 +16,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
+import pytest
+
 SCRIPT_PATH = Path(__file__).parent.parent / "python" / "notion-fetch"
 ROOT_ID = "00000000-0000-0000-0000-000000000001"
 TOGGLE_ID = "00000000-0000-0000-0000-000000000002"
@@ -115,3 +117,22 @@ def test_multi_block_table_cells_are_folded_into_one_row() -> None:
         "| --- | --- |",
         "| first block<br><br>second block | other |",
     ]
+
+
+def test_poll_export_fails_fast_when_notion_has_no_record_of_task(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    notion_fetch = cast(Any, load_module())
+    unknown_task = {
+        "id": "task",
+        "state": "not_started",
+        "eventName": "unknown",
+        "request": {},
+    }
+    notion_fetch.api_post = lambda path, body, token: {"results": [unknown_task]}
+    notion_fetch.time.sleep = lambda s: pytest.fail("polled an unknown task")
+
+    with pytest.raises(SystemExit):
+        notion_fetch.poll_export("task", "token", 60)
+
+    assert "no record of export task" in capsys.readouterr().err
