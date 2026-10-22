@@ -39,6 +39,7 @@ date="${created_at%%T*}"
 # Frontmatter
 echo "---"
 echo "number: $issue_number"
+echo "url: https://github.com/$owner/$repo/issues/$issue_number"
 echo "date: $date"
 echo "title: $title_yaml"
 echo "---"
