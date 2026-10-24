@@ -3,20 +3,30 @@
 set -e
 
 usage() {
-    echo "Usage: gh-issue-to-md [-r|--reverse] <issue-number-or-url>" >&2
+    echo "Usage: gh-issue-to-md [-r|--reverse] [--last N] [--gte|--gt|--lte|--lt H1] <issue-number-or-url>" >&2
+    echo "H1 bounds compare comments' first-line H1 as strings; comments without one are excluded." >&2
     exit 1
 }
 
-comments_jq='add | .[]'
+reverse=false
 url=""
-for arg in "$@"; do
-    case "$arg" in
-        -r|--reverse) comments_jq='add | reverse | .[]' ;;
+last="" gte="" gt="" lte="" lt=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -r|--reverse) reverse=true ;;
+        --last|--gte|--gt|--lte|--lt)
+            [[ $# -ge 2 ]] || usage
+            printf -v "${1#--}" '%s' "$2"
+            shift
+            ;;
         -*) usage ;;
-        *) url="$arg" ;;
+        *) url="$1" ;;
     esac
+    shift
 done
 [[ -n "$url" ]] || usage
+jq_args=(--argjson reverse "$reverse" --arg last "$last"
+    --arg gte "$gte" --arg gt "$gt" --arg lte "$lte" --arg lt "$lt")
 
 # Accept bare issue numbers defaulting to temporalio/dandavison-log
 if [[ "$url" =~ ^[0-9]+$ ]]; then
@@ -63,8 +73,19 @@ if [[ -n "$body" && "$body" != "null" ]]; then
 fi
 
 # Fetch and output comments
-comments=$(gh api "$api_path/comments" --paginate)
-comment_count=$(echo "$comments" | jq -s 'add | length')
+comments=$(gh api "$api_path/comments" --paginate | jq -s "${jq_args[@]}" '
+    def h1: (.body // "") | (capture("^# (?<h>[^\r\n]*)").h // null);
+    def in_bounds($h):
+        [$gte, $gt, $lte, $lt] == ["", "", "", ""]
+        or ($h != null
+            and ($gte == "" or $h >= $gte) and ($gt == "" or $h > $gt)
+            and ($lte == "" or $h <= $lte) and ($lt == "" or $h < $lt));
+    add
+    | map(select(in_bounds(h1)))
+    | if $last == "" then . else .[-($last | tonumber):] end
+    | if $reverse then reverse else . end
+')
+comment_count=$(echo "$comments" | jq 'length')
 
 if [[ "$comment_count" -gt 0 ]]; then
     echo "---"
@@ -72,7 +93,7 @@ if [[ "$comment_count" -gt 0 ]]; then
     echo "## Comments"
     echo
 
-    echo "$comments" | jq -cs "$comments_jq" | while read -r comment; do
+    echo "$comments" | jq -c '.[]' | while read -r comment; do
         comment_author=$(echo "$comment" | jq -r '.user.login')
         comment_created=$(echo "$comment" | jq -r '.created_at')
         comment_body=$(echo "$comment" | jq -r '.body // ""')
