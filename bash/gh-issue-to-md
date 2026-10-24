@@ -2,12 +2,21 @@
 
 set -e
 
-if [[ -z "$1" ]]; then
-    echo "Usage: gh-issue-to-md <issue-number-or-url>" >&2
+usage() {
+    echo "Usage: gh-issue-to-md [-r|--reverse] <issue-number-or-url>" >&2
     exit 1
-fi
+}
 
-url="$1"
+comments_jq='add | .[]'
+url=""
+for arg in "$@"; do
+    case "$arg" in
+        -r|--reverse) comments_jq='add | reverse | .[]' ;;
+        -*) usage ;;
+        *) url="$arg" ;;
+    esac
+done
+[[ -n "$url" ]] || usage
 
 # Accept bare issue numbers defaulting to temporalio/dandavison-log
 if [[ "$url" =~ ^[0-9]+$ ]]; then
@@ -55,7 +64,7 @@ fi
 
 # Fetch and output comments
 comments=$(gh api "$api_path/comments" --paginate)
-comment_count=$(echo "$comments" | jq -r 'length')
+comment_count=$(echo "$comments" | jq -s 'add | length')
 
 if [[ "$comment_count" -gt 0 ]]; then
     echo "---"
@@ -63,7 +72,7 @@ if [[ "$comment_count" -gt 0 ]]; then
     echo "## Comments"
     echo
 
-    echo "$comments" | jq -c '.[]' | while read -r comment; do
+    echo "$comments" | jq -cs "$comments_jq" | while read -r comment; do
         comment_author=$(echo "$comment" | jq -r '.user.login')
         comment_created=$(echo "$comment" | jq -r '.created_at')
         comment_body=$(echo "$comment" | jq -r '.body // ""')
