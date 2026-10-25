@@ -4,7 +4,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["pytest"]
 # ///
-"""Tests for gh-issue-to-md, run against a fake `gh` that serves two pages of comments."""
+"""Tests for gh-issue-fetch, run against a fake `gh` that serves two pages of comments."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).parent.parent / "bash" / "gh-issue-to-md"
+SCRIPT_PATH = Path(__file__).parent.parent / "bash" / "gh-issue-fetch"
 
 ISSUE = {"title": "Log", "body": "", "created_at": "2026-01-01T00:00:00Z"}
 PAGES = [

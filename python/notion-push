@@ -13,7 +13,7 @@ Markdown-to-blocks conversion. This is the same conversion as the "Import >
 Markdown" menu item, and the inverse of notion-fetch.
 
 Usage:
-  gh-issue-to-md 42 | notion-push [--parent <notion-url> | --page <notion-url>] [--title TITLE]
+  gh-issue-fetch 42 | notion-push [--parent <notion-url> | --page <notion-url>] [--title TITLE]
 
 Prints the new page's URL. The title comes from --title, else the YAML
 frontmatter `title`, else the first H1; frontmatter is dropped, as is a leading

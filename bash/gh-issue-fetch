@@ -3,7 +3,7 @@
 set -e
 
 usage() {
-    echo "Usage: gh-issue-to-md [-r|--reverse] [--last N] [--gte|--gt|--lte|--lt H1] <issue-number-or-url>" >&2
+    echo "Usage: gh-issue-fetch [-r|--reverse] [--last N] [--gte|--gt|--lte|--lt H1] <issue-number-or-url>" >&2
     echo "H1 bounds compare comments' first-line H1 as strings; comments without one are excluded." >&2
     exit 1
 }
